@@ -1,0 +1,283 @@
+{
+    "system": {
+        "paths": {
+            "base_dir": ".",
+            "config_dir": "configs",
+            "data_dir": "data",
+            "log_dir": "logs",
+            "temp_dir": "temp",
+            "cache_dir": "cache",
+            "backup_dir": "backup",
+            "models_dir": "backend/data/models",
+            "images_dir": "backend/data/images",
+            "tags_dir": "backend/data/tags",
+            "poses_dir": "backend/data/poses"
+        },
+        "security": {
+            "encryption_key": "",
+            "allowed_hosts": [
+                "pixiv.net",
+                "i.pximg.net"
+            ],
+            "max_file_size": 104857600,
+            "max_memory": 1073741824,
+            "rate_limit": 100
+        },
+        "performance": {
+            "max_workers": 2,
+            "queue_size": 100,
+            "cache_size": 50,
+            "batch_size": 2,
+            "timeout": 10,
+            "retry_count": 2,
+            "retry_delay": 1,
+            "cleanup_interval": 3600
+        },
+        "debug": {
+            "enabled": true,
+            "log_level": "debug",
+            "profiling": false,
+            "trace": false,
+            "verbose": true,
+            "dry_run": false
+        }
+    },
+    "modules": {
+        "ai": {
+            "name": "ai",
+            "version": "1.0.0",
+            "enabled": true,
+            "stable_diffusion": {
+                "api_url": "http://127.0.0.1:7860/sdapi/v1",
+                "timeout": 30,
+                "retry_count": 2,
+                "default_model": "test_model.safetensors",
+                "default_sampler": "DPM++ 2M Karras",
+                "default_steps": 10,
+                "default_cfg": 7.0,
+                "default_width": 256,
+                "default_height": 256,
+                "max_batch_size": 2,
+                "max_steps": 50,
+                "max_cfg": 20.0,
+                "max_width": 1024,
+                "max_height": 1024,
+                "models": [
+                    "test_model.safetensors"
+                ],
+                "samplers": [
+                    "DPM++ 2M Karras",
+                    "Euler a"
+                ],
+                "options": {}
+            },
+            "kohya_ss": {
+                "api_url": "http://127.0.0.1:7860",
+                "timeout": 60,
+                "retry_count": 2,
+                "default_epochs": 5,
+                "default_batch_size": 1,
+                "default_lr": 0.0001,
+                "max_epochs": 50,
+                "max_batch_size": 2,
+                "max_lr": 0.01,
+                "min_lr": 0.00001,
+                "options": {}
+            },
+            "openai": {
+                "api_keys": [
+                    "test_key"
+                ],
+                "model": "gpt-3.5-turbo",
+                "timeout": 30,
+                "retry_count": 2,
+                "max_tokens": 500,
+                "temperature": 0.7,
+                "top_p": 1.0,
+                "frequency_penalty": 0.0,
+                "presence_penalty": 0.0,
+                "rate_limit": 30,
+                "options": {}
+            },
+            "wd14tagger": {
+                "model_path": "",
+                "threshold": 0.35,
+                "batch_size": 1,
+                "max_tags": 50,
+                "skip_tags": [
+                    "low_quality",
+                    "blurry"
+                ],
+                "extend_tags": [
+                    "high_quality",
+                    "detailed"
+                ],
+                "tag_order": "character",
+                "save_type": "txt",
+                "options": {}
+            },
+            "timeout": 10,
+            "retry_count": 2,
+            "retry_delay": 1,
+            "max_workers": 2,
+            "batch_size": 2,
+            "queue_size": 50
+        },
+        "crawler": {
+            "name": "crawler",
+            "version": "1.0.0",
+            "enabled": true,
+            "pixiv": {
+                "cookie": "",
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "referer": "https://www.pixiv.net/",
+                "timeout": 10,
+                "retry_count": 2,
+                "max_concurrent": 2,
+                "default_delay": 1,
+                "max_delay": 5,
+                "options": {}
+            },
+            "download": {
+                "save_dir": "backend/data/images",
+                "filename_template": "{id}_{title}",
+                "overwrite": false,
+                "create_subdirs": true,
+                "max_file_size": 10485760,
+                "allowed_types": [
+                    ".jpg",
+                    ".png",
+                    ".gif",
+                    ".webp"
+                ],
+                "skip_existing": true,
+                "verify_checksum": true,
+                "options": {}
+            },
+            "rate_limit": {
+                "enabled": true,
+                "requests_per_minute": 30,
+                "requests_per_hour": 500,
+                "burst_size": 5,
+                "backoff_factor": 2.0,
+                "max_backoff": 30,
+                "options": {}
+            },
+            "timeout": 10,
+            "retry_count": 2,
+            "retry_delay": 1,
+            "max_workers": 2,
+            "queue_size": 100
+        },
+        "logger": {
+            "name": "logger",
+            "version": "1.0.0",
+            "enabled": true,
+            "level": {
+                "default": "debug",
+                "modules": {
+                    "ai": "debug",
+                    "crawler": "info",
+                    "config": "warn"
+                },
+                "dynamic": true
+            },
+            "output": {
+                "console": true,
+                "file": true,
+                "network": false,
+                "format": "text"
+            },
+            "file": {
+                "path": "logs/test_pixiv-tailor.log",
+                "max_size": 10,
+                "max_backups": 3,
+                "max_age": 7,
+                "compress": true,
+                "local_time": true
+            },
+            "format": {
+                "type": "text",
+                "timestamp": true,
+                "level": true,
+                "module": true,
+                "caller": false,
+                "stack": false,
+                "colors": true,
+                "full_time": true
+            },
+            "buffer_size": 100,
+            "flush_interval": 1
+        },
+        "utils": {
+            "name": "utils",
+            "version": "1.0.0",
+            "enabled": true,
+            "file": {
+                "max_file_size": 10485760,
+                "allowed_types": [
+                    ".jpg",
+                    ".png",
+                    ".gif",
+                    ".webp",
+                    ".txt",
+                    ".json"
+                ],
+                "create_backup": true,
+                "backup_suffix": ".bak",
+                "temp_dir": "temp",
+                "cleanup_temp": true,
+                "cleanup_interval": 1800
+            },
+            "string": {
+                "max_length": 500,
+                "sanitize_chars": ":/\\<>|?*",
+                "replace_char": "_",
+                "trim_spaces": true,
+                "normalize_unicode": true,
+                "case_sensitive": false
+            },
+            "network": {
+                "timeout": 10,
+                "retry_count": 2,
+                "user_agent": "PixivTailor/1.0.0",
+                "follow_redirects": true,
+                "max_redirects": 5,
+                "proxy_url": "",
+                "insecure_skip_verify": false
+            },
+            "cache": {
+                "enabled": true,
+                "max_size": 50,
+                "ttl": 1800,
+                "cleanup_interval": 300,
+                "storage": "memory",
+                "path": "cache"
+            },
+            "timeout": 10,
+            "retry_count": 2,
+            "retry_delay": 1,
+            "max_workers": 2
+        }
+    },
+    "user": {
+        "preferences": {
+            "test_mode": true,
+            "debug_enabled": true
+        },
+        "custom_settings": {
+            "test_setting": "test_value"
+        },
+        "language": "zh-CN",
+        "theme": "default",
+        "timezone": "Asia/Shanghai"
+    },
+    "metadata": {
+        "version": "1.0.0",
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-01T00:00:00Z",
+        "last_backup": "0001-01-01T00:00:00Z",
+        "checksum": ""
+    }
+}

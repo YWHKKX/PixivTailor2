@@ -1,0 +1,574 @@
+/* Gradio 风格样式 - 基于 plan.md 设计 */
+
+/* 全局样式重置和基础设置 */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+:root {
+    /* 主色调 */
+    --primary-color: #6366f1;
+    --primary-hover: #5856eb;
+    --primary-light: #e0e7ff;
+
+    /* 辅助色 */
+    --secondary-color: #8b5cf6;
+    --success-color: #10b981;
+    --warning-color: #f59e0b;
+    --error-color: #ef4444;
+    --info-color: #3b82f6;
+
+    /* 中性色 */
+    --background-color: #f8fafc;
+    --surface-color: #ffffff;
+    --surface-hover: #f1f5f9;
+    --text-primary: #1f2937;
+    --text-secondary: #6b7280;
+    --text-muted: #9ca3af;
+    --border-color: #e5e7eb;
+    --border-hover: #d1d5db;
+
+    /* 阴影 */
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+
+    /* 圆角 */
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 16px;
+
+    /* 间距 */
+    --spacing-xs: 4px;
+    --spacing-sm: 8px;
+    --spacing-md: 16px;
+    --spacing-lg: 24px;
+    --spacing-xl: 32px;
+
+    /* 字体 */
+    --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-size-xs: 12px;
+    --font-size-sm: 14px;
+    --font-size-base: 16px;
+    --font-size-lg: 18px;
+    --font-size-xl: 20px;
+    --font-size-2xl: 24px;
+    --font-size-3xl: 30px;
+}
+
+/* 基础样式 */
+body {
+    font-family: var(--font-family);
+    background-color: var(--background-color);
+    color: var(--text-primary);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Gradio 布局 */
+.gradio-layout {
+    min-height: 100vh;
+    background: var(--background-color);
+}
+
+.gradio-header {
+    background: var(--surface-color);
+    border-bottom: 1px solid var(--border-color);
+    box-shadow: var(--shadow-sm);
+    padding: var(--spacing-lg) var(--spacing-xl);
+}
+
+.header-content {
+    max-width: 1400px;
+    margin: 0 auto;
+    text-align: center;
+}
+
+.app-title {
+    color: var(--primary-color) !important;
+    margin-bottom: var(--spacing-xs) !important;
+    font-weight: 700 !important;
+}
+
+.header-subtitle {
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+}
+
+.gradio-main {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: var(--spacing-xl);
+    gap: var(--spacing-xl);
+}
+
+.gradio-sider {
+    background: var(--surface-color) !important;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow-sm);
+    padding: var(--spacing-lg);
+    height: fit-content;
+}
+
+.sider-content {
+    height: 100%;
+}
+
+.gradio-content {
+    background: var(--surface-color);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow-sm);
+    padding: var(--spacing-lg);
+}
+
+.content-wrapper {
+    height: 100%;
+}
+
+.gradio-footer {
+    background: var(--surface-color);
+    border-top: 1px solid var(--border-color);
+    text-align: center;
+    padding: var(--spacing-lg);
+}
+
+.footer-content {
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+.footer-title {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--spacing-sm);
+}
+
+.footer-steps {
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+}
+
+.footer-steps div {
+    margin-bottom: var(--spacing-xs);
+}
+
+/* 组件样式 */
+.gradio-input-panel,
+.gradio-output-panel,
+.gradio-control-panel,
+.gradio-settings-panel {
+    margin-bottom: var(--spacing-lg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    transition: all 0.3s ease;
+}
+
+.gradio-input-panel:hover,
+.gradio-output-panel:hover,
+.gradio-control-panel:hover,
+.gradio-settings-panel:hover {
+    box-shadow: var(--shadow-md);
+    border-color: var(--border-hover);
+}
+
+.gradio-label {
+    display: block;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: var(--spacing-sm);
+    font-size: var(--font-size-sm);
+}
+
+/* 画廊样式 */
+.gradio-gallery {
+    min-height: 400px;
+    border: 2px dashed var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: var(--spacing-lg);
+    background: var(--surface-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.gallery-placeholder {
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.placeholder-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--spacing-md);
+}
+
+.placeholder-icon {
+    font-size: 48px;
+    opacity: 0.5;
+}
+
+.placeholder-text {
+    font-size: var(--font-size-lg);
+    font-weight: 500;
+}
+
+.gallery-item {
+    position: relative;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    transition: transform 0.2s ease;
+    cursor: pointer;
+}
+
+.gallery-item:hover {
+    transform: scale(1.02);
+    box-shadow: var(--shadow-md);
+}
+
+.gallery-item img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.gallery-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-sm);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.gallery-item:hover .gallery-overlay {
+    opacity: 1;
+}
+
+.download-btn,
+.fullscreen-btn {
+    background: var(--surface-color);
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: var(--spacing-sm);
+    cursor: pointer;
+    font-size: var(--font-size-lg);
+    transition: all 0.2s ease;
+}
+
+.download-btn:hover,
+.fullscreen-btn:hover {
+    background: var(--primary-color);
+    color: white;
+}
+
+/* 状态显示 */
+.status-display {
+    background: var(--surface-hover) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: var(--radius-md) !important;
+    padding: var(--spacing-sm) var(--spacing-md) !important;
+    font-family: 'Monaco', 'Menlo', monospace !important;
+    font-size: var(--font-size-xs) !important;
+    color: var(--text-secondary) !important;
+}
+
+.status-display.processing {
+    border-color: var(--info-color) !important;
+    background: rgba(59, 130, 246, 0.1) !important;
+}
+
+.status-display.completed {
+    border-color: var(--success-color) !important;
+    background: rgba(16, 185, 129, 0.1) !important;
+}
+
+.status-display.failed {
+    border-color: var(--error-color) !important;
+    background: rgba(239, 68, 68, 0.1) !important;
+}
+
+.status-display.pending {
+    border-color: var(--warning-color) !important;
+    background: rgba(245, 158, 11, 0.1) !important;
+}
+
+/* 系统状态指示器 */
+.system-status {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    padding: var(--spacing-xs) var(--spacing-sm);
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-xs);
+    font-weight: 500;
+}
+
+.system-status.connected {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--success-color);
+}
+
+.system-status.disconnected {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--error-color);
+}
+
+.system-status.error {
+    background: rgba(245, 158, 11, 0.1);
+    color: var(--warning-color);
+}
+
+/* 按钮样式增强 */
+.ant-btn {
+    border-radius: var(--radius-md) !important;
+    font-weight: 500 !important;
+    transition: all 0.2s ease !important;
+}
+
+.ant-btn-primary {
+    background: var(--primary-color) !important;
+    border-color: var(--primary-color) !important;
+}
+
+.ant-btn-primary:hover {
+    background: var(--primary-hover) !important;
+    border-color: var(--primary-hover) !important;
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md) !important;
+}
+
+.ant-btn-danger {
+    background: var(--error-color) !important;
+    border-color: var(--error-color) !important;
+}
+
+.ant-btn-danger:hover {
+    background: #dc2626 !important;
+    border-color: #dc2626 !important;
+}
+
+/* 滑块样式增强 */
+.ant-slider {
+    margin: var(--spacing-md) 0 !important;
+}
+
+.ant-slider .ant-slider-track {
+    background: var(--primary-color) !important;
+}
+
+.ant-slider .ant-slider-handle {
+    border-color: var(--primary-color) !important;
+    box-shadow: var(--shadow-sm) !important;
+}
+
+.ant-slider .ant-slider-handle:hover {
+    transform: scale(1.1);
+    box-shadow: var(--shadow-md) !important;
+}
+
+/* 输入框样式增强 */
+.ant-input,
+.ant-input-affix-wrapper {
+    border-radius: var(--radius-md) !important;
+    border: 1px solid var(--border-color) !important;
+    transition: all 0.2s ease !important;
+}
+
+.ant-input:focus,
+.ant-input-affix-wrapper:focus,
+.ant-input-focused,
+.ant-input-affix-wrapper-focused {
+    border-color: var(--primary-color) !important;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1) !important;
+}
+
+/* 选择器样式增强 */
+.ant-select {
+    border-radius: var(--radius-md) !important;
+}
+
+.ant-select .ant-select-selector {
+    border-radius: var(--radius-md) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+.ant-select-focused .ant-select-selector {
+    border-color: var(--primary-color) !important;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1) !important;
+}
+
+/* 开关样式增强 */
+.ant-switch {
+    background: var(--border-color) !important;
+}
+
+.ant-switch-checked {
+    background: var(--primary-color) !important;
+}
+
+/* 进度条样式增强 */
+.ant-progress {
+    margin: var(--spacing-md) 0 !important;
+}
+
+.ant-progress .ant-progress-bg {
+    background: linear-gradient(90deg, var(--primary-color), var(--secondary-color)) !important;
+}
+
+/* 卡片样式增强 */
+.ant-card {
+    border-radius: var(--radius-lg) !important;
+    border: 1px solid var(--border-color) !important;
+    box-shadow: var(--shadow-sm) !important;
+}
+
+.ant-card-head {
+    border-bottom: 1px solid var(--border-color) !important;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
+}
+
+.ant-card-head-title {
+    font-weight: 600 !important;
+    color: var(--text-primary) !important;
+}
+
+/* 响应式设计 */
+@media (max-width: 1024px) {
+    .gradio-main {
+        flex-direction: column;
+        gap: var(--spacing-lg);
+    }
+
+    .gradio-sider {
+        width: 100% !important;
+        max-width: none !important;
+    }
+
+    .gradio-content {
+        width: 100% !important;
+    }
+}
+
+@media (max-width: 768px) {
+    .gradio-main {
+        padding: var(--spacing-md);
+    }
+
+    .gradio-header {
+        padding: var(--spacing-md);
+    }
+
+    .app-title {
+        font-size: var(--font-size-xl) !important;
+    }
+
+    .gradio-sider,
+    .gradio-content {
+        padding: var(--spacing-md);
+    }
+}
+
+/* 动画效果 */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateX(-20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
+}
+
+.fade-in {
+    animation: fadeIn 0.5s ease-out;
+}
+
+.slide-in {
+    animation: slideIn 0.3s ease-out;
+}
+
+.pulse {
+    animation: pulse 2s infinite;
+}
+
+/* 加载动画 */
+.loading-spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--border-color);
+    border-top: 2px solid var(--primary-color);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    display: inline-block;
+    margin-right: var(--spacing-sm);
+}
+
+@keyframes spin {
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
+}
+
+/* 禁用状态 */
+.ant-btn:disabled,
+.ant-input:disabled,
+.ant-slider:disabled {
+    opacity: 0.6 !important;
+    cursor: not-allowed !important;
+}
+
+/* 错误状态 */
+.error {
+    border-color: var(--error-color) !important;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1) !important;
+}
+
+/* 成功状态 */
+.success {
+    border-color: var(--success-color) !important;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1) !important;
+}

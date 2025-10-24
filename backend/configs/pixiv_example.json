@@ -1,0 +1,46 @@
+{
+    "description": "爬虫模块配置示例文件",
+    "version": "1.0.0",
+    "usage": "将此文件复制为crawler_config.json并根据需要修改配置",
+    "pixiv": {
+        "cookie": "your_pixiv_cookie_here",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0",
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "accept_language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+        "referer": "https://www.pixiv.net/",
+        "timeout": 120,
+        "retry_count": 5,
+        "max_concurrent": 5,
+        "default_delay": 2.0,
+        "max_delay": 10.0,
+        "proxy": {
+            "enabled": false,
+            "url": "http://127.0.0.1:7890"
+        },
+        "api": {
+            "search_tag": "https://www.pixiv.net/ajax/search/artworks",
+            "user_works": "https://www.pixiv.net/ajax/user",
+            "illust_pages": "https://www.pixiv.net/ajax/illust",
+            "artworks": "https://www.pixiv.net/artworks"
+        },
+        "options": {}
+    },
+    "download": {
+        "save_dir": "backend/data/images",
+        "filename_template": "{id}_{title}",
+        "overwrite": false,
+        "create_subdirs": true,
+        "max_file_size": 52428800,
+        "allowed_types": [
+            ".jpg",
+            ".png",
+            ".gif",
+            ".webp"
+        ],
+        "skip_existing": true,
+        "verify_checksum": true,
+        "progress_display": true,
+        "auto_retry": true,
+        "options": {}
+    }
+}

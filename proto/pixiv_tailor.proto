@@ -1,0 +1,289 @@
+syntax = "proto3";
+
+package pixiv_tailor;
+
+option go_package = "pixiv-tailor/proto/pixiv_tailor";
+
+// ============================================================================
+// 通用消息类型
+// ============================================================================
+
+message Status {
+  int32 code = 1;
+  string message = 2;
+  string details = 3;
+}
+
+message Pagination {
+  int32 page = 1;
+  int32 page_size = 2;
+  int32 total = 3;
+}
+
+// ============================================================================
+// 配置相关消息
+// ============================================================================
+
+message ConfigModule {
+  string name = 1;
+  string config = 2; // JSON 字符串
+}
+
+message GetConfigRequest {
+  string module = 1;
+}
+
+message GetConfigResponse {
+  Status status = 1;
+  ConfigModule config = 2;
+}
+
+message UpdateConfigRequest {
+  string module = 1;
+  string config = 2; // JSON 字符串
+}
+
+message UpdateConfigResponse {
+  Status status = 1;
+}
+
+message ExportConfigRequest {
+  repeated string modules = 1;
+}
+
+message ExportConfigResponse {
+  Status status = 1;
+  string config_data = 2; // JSON 字符串
+}
+
+message ImportConfigRequest {
+  string config_data = 1; // JSON 字符串
+}
+
+message ImportConfigResponse {
+  Status status = 1;
+}
+
+// ============================================================================
+// 任务相关消息
+// ============================================================================
+
+message Task {
+  string id = 1;
+  string type = 2;
+  string status = 3;
+  string config = 4; // JSON 字符串
+  string created_at = 5;
+  string updated_at = 6;
+  string error_message = 7;
+}
+
+message CreateTaskRequest {
+  string type = 1;
+  string config = 2; // JSON 字符串
+}
+
+message CreateTaskResponse {
+  Status status = 1;
+  Task task = 2;
+}
+
+message GetTaskStatusRequest {
+  string task_id = 1;
+}
+
+message GetTaskStatusResponse {
+  Status status = 1;
+  Task task = 2;
+}
+
+message ListTasksRequest {
+  Pagination pagination = 1;
+  string status = 2;
+  string type = 3;
+}
+
+message ListTasksResponse {
+  Status status = 1;
+  repeated Task tasks = 2;
+  Pagination pagination = 3;
+}
+
+message CancelTaskRequest {
+  string task_id = 1;
+}
+
+message CancelTaskResponse {
+  Status status = 1;
+}
+
+// ============================================================================
+// 进度跟踪相关消息
+// ============================================================================
+
+message TaskProgressUpdate {
+  string task_id = 1;
+  int32 progress = 2; // 0-100
+  string status = 3;
+  string message = 4;
+  string details = 5;
+}
+
+message GetTaskProgressRequest {
+  string task_id = 1;
+}
+
+message LogEntry {
+  string timestamp = 1;
+  string level = 2;
+  string message = 3;
+  string details = 4;
+}
+
+message GetTaskLogsRequest {
+  string task_id = 1;
+  int32 limit = 2;
+}
+
+// ============================================================================
+// 数据管理相关消息
+// ============================================================================
+
+message CrawlResult {
+  string id = 1;
+  string url = 2;
+  string title = 3;
+  string author = 4;
+  repeated string tags = 5;
+  string image_url = 6;
+  string created_at = 7;
+}
+
+message GetCrawlResultsRequest {
+  Pagination pagination = 1;
+  repeated string tags = 2;
+  string author = 3;
+}
+
+message GetCrawlResultsResponse {
+  Status status = 1;
+  repeated CrawlResult results = 2;
+  Pagination pagination = 3;
+}
+
+message GeneratedImage {
+  string id = 1;
+  string prompt = 2;
+  string image_url = 3;
+  string model = 4;
+  string created_at = 5;
+}
+
+message GetGeneratedImagesRequest {
+  Pagination pagination = 1;
+  string model = 2;
+}
+
+message GetGeneratedImagesResponse {
+  Status status = 1;
+  repeated GeneratedImage images = 2;
+  Pagination pagination = 3;
+}
+
+message TrainedModel {
+  string id = 1;
+  string name = 2;
+  string type = 3;
+  string path = 4;
+  string created_at = 5;
+}
+
+message GetTrainedModelsRequest {
+  Pagination pagination = 1;
+  string type = 2;
+}
+
+message GetTrainedModelsResponse {
+  Status status = 1;
+  repeated TrainedModel models = 2;
+  Pagination pagination = 3;
+}
+
+// ============================================================================
+// 系统监控相关消息
+// ============================================================================
+
+message SystemInfo {
+  string version = 1;
+  string status = 2;
+  string uptime = 3;
+  MemoryInfo memory = 4;
+  CPUInfo cpu = 5;
+  DiskInfo disk = 6;
+  int32 active_connections = 7;
+  repeated string warnings = 8;
+}
+
+message MemoryInfo {
+  int64 used = 1;
+  int64 total = 2;
+  int32 usage = 3;
+  int64 available = 4;
+}
+
+message CPUInfo {
+  int32 usage = 1;
+  int32 average = 2;
+  int32 peak = 3;
+}
+
+message DiskInfo {
+  int64 data = 1;
+  int64 data_used = 2;
+  int64 data_total = 3;
+  int64 models = 4;
+  int64 models_used = 5;
+  int64 models_total = 6;
+  int64 logs = 7;
+  int64 logs_used = 8;
+  int64 logs_total = 9;
+}
+
+message GetSystemInfoRequest {
+  // 空请求
+}
+
+message GetSystemInfoResponse {
+  Status status = 1;
+  SystemInfo system_info = 2;
+}
+
+// ============================================================================
+// gRPC 服务定义
+// ============================================================================
+
+service PixivTailorService {
+  // 配置管理
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+  rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
+  rpc ExportConfig(ExportConfigRequest) returns (ExportConfigResponse);
+  rpc ImportConfig(ImportConfigRequest) returns (ImportConfigResponse);
+  
+  // 任务管理
+  rpc CreateTask(CreateTaskRequest) returns (CreateTaskResponse);
+  rpc GetTaskStatus(GetTaskStatusRequest) returns (GetTaskStatusResponse);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
+  
+  // 进度跟踪
+  rpc GetTaskProgress(GetTaskProgressRequest) returns (stream TaskProgressUpdate);
+  rpc GetTaskLogs(GetTaskLogsRequest) returns (stream LogEntry);
+  
+  // 数据管理
+  rpc GetCrawlResults(GetCrawlResultsRequest) returns (GetCrawlResultsResponse);
+  rpc GetGeneratedImages(GetGeneratedImagesRequest) returns (GetGeneratedImagesResponse);
+  rpc GetTrainedModels(GetTrainedModelsRequest) returns (GetTrainedModelsResponse);
+  
+  // 系统监控
+  rpc GetSystemInfo(GetSystemInfoRequest) returns (GetSystemInfoResponse);
+}

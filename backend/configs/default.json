@@ -1,0 +1,43 @@
+{
+  "version": "1.0.0",
+  "modules": {
+    "ai": {
+      "name": "ai",
+      "version": "1.0.0",
+      "sd_webui": {
+        "url": "http://127.0.0.1:7860",
+        "api_key": "",
+        "timeout": 60
+      },
+      "kohya_ss": {
+        "url": "http://127.0.0.1:7861",
+        "timeout": 60
+      },
+      "openai": {
+        "api_keys": [],
+        "timeout": 30
+      }
+    },
+    "crawler": {
+      "name": "crawler",
+      "version": "1.0.0",
+      "pixiv": {
+        "cookie": "",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
+        "delay": 2,
+        "retry_count": 3,
+        "timeout": 30
+      }
+    },
+    "logger": {
+      "name": "logger",
+      "version": "1.0.0",
+      "level": "info",
+      "format": "text",
+      "output": "stdout"
+    }
+  },
+  "created_at": "2025-10-23T09:21:39.8882044+08:00",
+  "updated_at": "2025-10-23T09:21:39.8882044+08:00"
+}
