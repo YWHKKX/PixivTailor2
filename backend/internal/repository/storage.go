@@ -18,8 +18,10 @@ type Storage interface {
 	UpdateTaskError(id, errorMsg string) error
 	UpdateTaskImagesFound(id string, count int) error
 	UpdateTaskImagesDownloaded(id string, count int) error
+	UpdateTaskResult(id string, result string) error
 	ListTasks(status, taskType string, limit, offset int) ([]*Task, error)
 	CountTasks(status, taskType string) (int, error)
+	DeleteTask(id string) error
 	CleanupTasksByStatus(status string) (int, error)
 	CleanupAllTasks() (int, error)
 	GetConfig(module string) (string, error)
@@ -43,6 +45,7 @@ type Task struct {
 	Config           string    `json:"config"`
 	Progress         int       `json:"progress"`
 	ErrorMessage     string    `json:"error_message"`
+	Result           string    `json:"result"`            // 任务结果（JSON格式）
 	ImagesFound      int       `json:"images_found"`      // 获取到的图片数量
 	ImagesDownloaded int       `json:"images_downloaded"` // 下载的图片数量
 	CreatedAt        time.Time `json:"created_at"`
@@ -104,6 +107,11 @@ func (s *SQLiteStorage) Close() error {
 	return s.db.Close()
 }
 
+// GetDB 获取数据库连接
+func (s *SQLiteStorage) GetDB() *sql.DB {
+	return s.db
+}
+
 // initTables 初始化数据库表
 func (s *SQLiteStorage) initTables() error {
 	// 先检查并添加新字段（数据库迁移）
@@ -119,6 +127,7 @@ func (s *SQLiteStorage) initTables() error {
 			config TEXT,
 			progress INTEGER DEFAULT 0,
 			error_message TEXT,
+			result TEXT,
 			images_found INTEGER DEFAULT 0,
 			images_downloaded INTEGER DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -175,6 +184,11 @@ func (s *SQLiteStorage) migrateTables() error {
 		return err
 	}
 
+	// 检查并添加 result 字段
+	if err := s.addColumnIfNotExists("tasks", "result", "TEXT"); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -210,20 +224,24 @@ func (s *SQLiteStorage) CreateTask(task *Task) error {
 
 // GetTask 获取任务
 func (s *SQLiteStorage) GetTask(id string) (*Task, error) {
-	query := `SELECT id, type, status, config, progress, error_message, images_found, images_downloaded, created_at, updated_at 
+	query := `SELECT id, type, status, config, progress, error_message, result, images_found, images_downloaded, created_at, updated_at 
 			  FROM tasks WHERE id = ?`
 	row := s.db.QueryRow(query, id)
 
 	task := &Task{}
 	var errorMessage sql.NullString
+	var result sql.NullString
 	err := row.Scan(&task.ID, &task.Type, &task.Status, &task.Config, &task.Progress,
-		&errorMessage, &task.ImagesFound, &task.ImagesDownloaded, &task.CreatedAt, &task.UpdatedAt)
+		&errorMessage, &result, &task.ImagesFound, &task.ImagesDownloaded, &task.CreatedAt, &task.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 
 	if errorMessage.Valid {
 		task.ErrorMessage = errorMessage.String
+	}
+	if result.Valid {
+		task.Result = result.String
 	}
 
 	return task, nil
@@ -257,6 +275,13 @@ func (s *SQLiteStorage) UpdateTaskImagesDownloaded(id string, count int) error {
 	return err
 }
 
+// UpdateTaskResult 更新任务结果
+func (s *SQLiteStorage) UpdateTaskResult(id string, result string) error {
+	query := `UPDATE tasks SET result = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	_, err := s.db.Exec(query, result, id)
+	return err
+}
+
 // UpdateTaskError 更新任务错误信息
 func (s *SQLiteStorage) UpdateTaskError(id, errorMsg string) error {
 	query := `UPDATE tasks SET error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
@@ -266,7 +291,7 @@ func (s *SQLiteStorage) UpdateTaskError(id, errorMsg string) error {
 
 // ListTasks 列出任务
 func (s *SQLiteStorage) ListTasks(status, taskType string, limit, offset int) ([]*Task, error) {
-	query := `SELECT id, type, status, config, progress, error_message, created_at, updated_at 
+	query := `SELECT id, type, status, config, progress, error_message, result, images_found, images_downloaded, created_at, updated_at 
 			  FROM tasks WHERE 1=1`
 	args := []interface{}{}
 
@@ -292,13 +317,17 @@ func (s *SQLiteStorage) ListTasks(status, taskType string, limit, offset int) ([
 	for rows.Next() {
 		task := &Task{}
 		var errorMessage sql.NullString
+		var result sql.NullString
 		err := rows.Scan(&task.ID, &task.Type, &task.Status, &task.Config, &task.Progress,
-			&errorMessage, &task.CreatedAt, &task.UpdatedAt)
+			&errorMessage, &result, &task.ImagesFound, &task.ImagesDownloaded, &task.CreatedAt, &task.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
 		if errorMessage.Valid {
 			task.ErrorMessage = errorMessage.String
+		}
+		if result.Valid {
+			task.Result = result.String
 		}
 		tasks = append(tasks, task)
 	}
@@ -470,6 +499,16 @@ func (s *SQLiteStorage) CleanupAllTasks() (int, error) {
 	}
 
 	return int(rowsAffected), nil
+}
+
+// DeleteTask 删除指定任务
+func (s *SQLiteStorage) DeleteTask(id string) error {
+	query := `DELETE FROM tasks WHERE id = ?`
+	_, err := s.db.Exec(query, id)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // AddCrawlResult 添加爬取结果

@@ -18,6 +18,8 @@ type PathManager struct {
 	tagsDir   string
 	posesDir  string
 	cacheDir  string
+	webuiDir  string
+	webuiBat  string
 	mu        sync.RWMutex
 }
 
@@ -86,7 +88,7 @@ func (pm *PathManager) initPaths() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	pm.configDir = filepath.Join(pm.rootDir, "backend", "configs")
+	pm.configDir = filepath.Join(pm.rootDir, "backend", "global_configs")
 	pm.dataDir = filepath.Join(pm.rootDir, "backend", "data")
 	pm.logsDir = filepath.Join(pm.rootDir, "backend", "data", "logs")
 	pm.imagesDir = filepath.Join(pm.rootDir, "backend", "data", "images")
@@ -94,6 +96,10 @@ func (pm *PathManager) initPaths() {
 	pm.tagsDir = filepath.Join(pm.rootDir, "backend", "data", "tags")
 	pm.posesDir = filepath.Join(pm.rootDir, "backend", "data", "poses")
 	pm.cacheDir = filepath.Join(pm.rootDir, "backend", "data", "cache")
+
+	// WebUI 路径配置
+	pm.webuiDir = "D:\\PythonProject\\stable-diffusion-webui"
+	pm.webuiBat = filepath.Join(pm.webuiDir, "webui.bat")
 }
 
 // ensureDirectories 确保所有必要的目录存在
@@ -238,6 +244,13 @@ func (pm *PathManager) GetTaskCacheDir(taskID string) string {
 	return filepath.Join(pm.cacheDir, fmt.Sprintf("task_%s", taskID))
 }
 
+// GetTaskImagesDir 获取任务图片目录
+func (pm *PathManager) GetTaskImagesDir(taskID string) string {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return filepath.Join(pm.imagesDir, fmt.Sprintf("task_%s", taskID))
+}
+
 // Join 连接路径（相对于根目录）
 func (pm *PathManager) Join(elem ...string) string {
 	pm.mu.RLock()
@@ -274,4 +287,18 @@ func (pm *PathManager) GetDatabasePath() string {
 
 func (pm *PathManager) GetMainLogPath() string {
 	return pm.GetLogPath("pixiv-tailor.log")
+}
+
+// GetWebUIDir 获取WebUI目录
+func (pm *PathManager) GetWebUIDir() string {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.webuiDir
+}
+
+// GetWebUIBat 获取WebUI批处理文件路径
+func (pm *PathManager) GetWebUIBat() string {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.webuiBat
 }

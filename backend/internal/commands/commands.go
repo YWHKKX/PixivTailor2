@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"pixiv-tailor/backend/internal/ai"
 	"pixiv-tailor/backend/internal/crawler"
@@ -18,6 +19,7 @@ import (
 	"pixiv-tailor/backend/internal/logger"
 	"pixiv-tailor/backend/internal/repository"
 	"pixiv-tailor/backend/internal/service"
+
 	"pixiv-tailor/backend/pkg/models"
 	"pixiv-tailor/backend/pkg/paths"
 	pb "pixiv-tailor/proto"
@@ -53,65 +55,89 @@ func findAvailablePort(startPort int, maxAttempts int) (int, error) {
 
 // killProcessOnPort 杀死占用指定端口的进程
 func killProcessOnPort(port int) error {
+	logger.Warnf("端口 %d 被占用，正在查找并终止占用进程...", port)
+
 	// 在Windows上使用netstat和taskkill命令
 	cmd := fmt.Sprintf("netstat -ano | findstr :%d", port)
 	output, err := exec.Command("cmd", "/C", cmd).Output()
 	if err != nil {
+		logger.Errorf("检查端口占用失败: %v", err)
 		return fmt.Errorf("检查端口占用失败: %v", err)
 	}
 
 	lines := strings.Split(string(output), "\n")
+	processesFound := 0
+
 	for _, line := range lines {
-		if strings.Contains(line, fmt.Sprintf(":%d", port)) && strings.Contains(line, "LISTENING") {
+		if strings.Contains(line, fmt.Sprintf(":%d", port)) && (strings.Contains(line, "LISTENING") || strings.Contains(line, "ESTABLISHED")) {
 			parts := strings.Fields(line)
 			if len(parts) >= 5 {
 				pid := parts[len(parts)-1]
-				logger.Infof("发现端口 %d 被进程 %s 占用，正在终止...", port, pid)
+				processesFound++
+				logger.Warnf("发现端口 %d 被进程 %s 占用，正在强制终止...", port, pid)
 
 				// 杀死进程
 				killCmd := fmt.Sprintf("taskkill /PID %s /F", pid)
 				killOutput, killErr := exec.Command("cmd", "/C", killCmd).Output()
 				if killErr != nil {
-					logger.Warnf("终止进程失败: %v, 输出: %s", killErr, string(killOutput))
-					return fmt.Errorf("终止进程失败: %v", killErr)
+					logger.Errorf("终止进程 %s 失败: %v, 输出: %s", pid, killErr, string(killOutput))
+					// 继续尝试终止其他进程
+					continue
 				}
 
-				logger.Infof("成功终止进程 %s，端口 %d 现在可用", pid, port)
-				return nil
+				logger.Infof("成功终止进程 %s，释放端口 %d", pid, port)
 			}
 		}
 	}
 
-	return fmt.Errorf("未找到占用端口 %d 的进程", port)
+	if processesFound == 0 {
+		logger.Warnf("未找到占用端口 %d 的进程，可能端口已被释放", port)
+		return nil
+	}
+
+	// 等待进程完全终止
+	time.Sleep(2 * time.Second)
+	logger.Infof("已尝试终止 %d 个占用端口 %d 的进程", processesFound, port)
+	return nil
 }
 
 // ensurePortAvailable 确保端口可用，如果被占用则kill进程
 func ensurePortAvailable(port int) error {
 	addr := fmt.Sprintf(":%d", port)
+	maxRetries := 3
 
-	// 尝试监听端口
-	listener, err := net.Listen("tcp", addr)
-	if err == nil {
-		listener.Close()
-		logger.Infof("端口 %d 可用", port)
-		return nil
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// 尝试监听端口
+		listener, err := net.Listen("tcp", addr)
+		if err == nil {
+			listener.Close()
+			if attempt == 1 {
+				logger.Infof("端口 %d 可用", port)
+			} else {
+				logger.Infof("端口 %d 现在可用 (第 %d 次尝试)", port, attempt)
+			}
+			return nil
+		}
+
+		logger.Warnf("端口 %d 被占用 (第 %d/%d 次尝试): %v", port, attempt, maxRetries, err)
+
+		// 如果是最后一次尝试，直接返回错误
+		if attempt == maxRetries {
+			return fmt.Errorf("端口 %d 在 %d 次尝试后仍被占用: %v", port, maxRetries, err)
+		}
+
+		// 尝试kill占用进程
+		logger.Warnf("正在尝试释放端口 %d...", port)
+		if killErr := killProcessOnPort(port); killErr != nil {
+			logger.Errorf("释放端口 %d 失败: %v", port, killErr)
+			// 继续尝试，可能端口会被其他方式释放
+		}
+
+		// 等待一段时间后重试
+		time.Sleep(time.Duration(attempt) * time.Second)
 	}
 
-	// 端口被占用，尝试kill进程
-	logger.Infof("端口 %d 被占用，尝试终止占用进程...", port)
-	if err := killProcessOnPort(port); err != nil {
-		return fmt.Errorf("无法释放端口 %d: %v", port, err)
-	}
-
-	// 再次尝试监听端口
-	listener, err = net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("端口 %d 仍被占用: %v", port, err)
-	}
-
-	listener.Close()
-	logger.Infof("端口 %d 现在可用", port)
-	return nil
+	return fmt.Errorf("端口 %d 在 %d 次尝试后仍被占用", port, maxRetries)
 }
 
 // ============================================================================
@@ -134,27 +160,59 @@ func ServerAction(ctx *cli.Context) error {
 		configPath = pm.GetMainConfigPath()
 	}
 
-	// 解析端口号
-	grpcPort := 50051 // 固定gRPC端口
-	httpPort := 50052 // 固定HTTP端口
+	// 解析端口号 - 使用固定端口作为默认值
+	grpcPort := 50051     // 固定gRPC端口
+	httpPort := 50052     // 固定HTTP端口
+	useFixedPorts := true // 是否使用固定端口
 
-	if strings.HasPrefix(port, ":") {
+	// 只有在明确指定了端口参数时才覆盖默认端口
+	if port != "" && strings.HasPrefix(port, ":") {
 		if p, err := strconv.Atoi(port[1:]); err == nil {
 			grpcPort = p
-			httpPort = p + 1 // HTTP端口 = gRPC端口 + 1
+			httpPort = p + 1      // HTTP端口 = gRPC端口 + 1
+			useFixedPorts = false // 用户指定了端口，不使用固定端口策略
 		}
 	}
 
-	// 确保gRPC端口可用
-	logger.Infof("检查gRPC端口 %d 可用性...", grpcPort)
-	if err := ensurePortAvailable(grpcPort); err != nil {
-		return fmt.Errorf("无法使用gRPC端口 %d: %v", grpcPort, err)
-	}
+	// 尝试使用固定端口
+	if useFixedPorts {
+		logger.Infof("尝试使用固定端口: gRPC=%d, HTTP=%d", grpcPort, httpPort)
 
-	// 确保HTTP端口可用
-	logger.Infof("检查HTTP端口 %d 可用性...", httpPort)
-	if err := ensurePortAvailable(httpPort); err != nil {
-		return fmt.Errorf("无法使用HTTP端口 %d: %v", httpPort, err)
+		// 检查gRPC端口
+		if err := ensurePortAvailable(grpcPort); err != nil {
+			logger.Warnf("固定gRPC端口 %d 不可用: %v", grpcPort, err)
+			logger.Infof("正在寻找可用的gRPC端口...")
+			if newPort, err := findAvailablePort(grpcPort, 10); err != nil {
+				return fmt.Errorf("无法找到可用的gRPC端口: %v", err)
+			} else {
+				grpcPort = newPort
+				httpPort = newPort + 1
+				logger.Infof("使用新的端口组合: gRPC=%d, HTTP=%d", grpcPort, httpPort)
+			}
+		}
+
+		// 检查HTTP端口
+		if err := ensurePortAvailable(httpPort); err != nil {
+			logger.Warnf("固定HTTP端口 %d 不可用: %v", httpPort, err)
+			logger.Infof("正在寻找可用的HTTP端口...")
+			if newPort, err := findAvailablePort(httpPort, 10); err != nil {
+				return fmt.Errorf("无法找到可用的HTTP端口: %v", err)
+			} else {
+				httpPort = newPort
+				logger.Infof("使用新的HTTP端口: %d", httpPort)
+			}
+		}
+	} else {
+		// 用户指定了端口，直接检查
+		logger.Infof("检查用户指定的gRPC端口 %d...", grpcPort)
+		if err := ensurePortAvailable(grpcPort); err != nil {
+			return fmt.Errorf("无法使用gRPC端口 %d: %v", grpcPort, err)
+		}
+
+		logger.Infof("检查用户指定的HTTP端口 %d...", httpPort)
+		if err := ensurePortAvailable(httpPort); err != nil {
+			return fmt.Errorf("无法使用HTTP端口 %d: %v", httpPort, err)
+		}
 	}
 
 	// 初始化日志系统
@@ -181,6 +239,13 @@ func ServerAction(ctx *cli.Context) error {
 	configService := service.NewConfigService(store)
 	dataService := service.NewDataService(store)
 	systemService := service.NewSystemService()
+	// 注意：配置管理已改为文件系统模式，不再需要 generation_configs 表
+	// generation_configs 表已移除，配置直接从 backend/data/configs/ 目录读取
+
+	// 创建空的配置服务（仅用于兼容性，实际不操作数据库）
+	generationConfigService := service.NewGenerationConfigService(nil)
+
+	// AI服务已迁移到新系统，不再需要初始化
 
 	// 创建 gRPC 服务器
 	server := grpcLib.NewServer()
@@ -208,7 +273,7 @@ func ServerAction(ctx *cli.Context) error {
 	logger.Info("按 Ctrl+C 停止服务器")
 
 	// 创建 HTTP 服务器
-	httpServer := http.NewHTTPServer(taskService, configService, dataService, systemService)
+	httpServer := http.NewHTTPServer(taskService, configService, dataService, systemService, generationConfigService)
 
 	// 启动 gRPC 服务器
 	go func() {
@@ -232,6 +297,12 @@ func ServerAction(ctx *cli.Context) error {
 	<-quit
 
 	logger.Info("正在关闭服务器...")
+
+	// 关闭WebUI进程
+	logger.Info("正在关闭WebUI进程...")
+	httpServer.StopWebUI()
+
+	// 优雅关闭gRPC服务器
 	server.GracefulStop()
 	logger.Info("服务器已关闭")
 

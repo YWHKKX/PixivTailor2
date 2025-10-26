@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"pixiv-tailor/backend/internal/config"
 	"pixiv-tailor/backend/pkg/models"
+	"pixiv-tailor/backend/pkg/paths"
 )
 
 // ============================================================================
@@ -78,10 +80,12 @@ type OpenAIClassifier struct {
 
 // NewClassifier 创建新的分类器实例
 func NewClassifier() (Classifier, error) {
-	// TODO: 从配置中读取参数
+	// 从配置文件加载AI配置
+	aiConfig := config.GetAIConfig()
+
 	return &OpenAIClassifier{
-		apiKeys: []string{},
-		timeout: 30,
+		apiKeys: aiConfig.OpenAI.APIKeys,
+		timeout: aiConfig.OpenAI.Timeout,
 	}, nil
 }
 
@@ -137,11 +141,13 @@ type SDWebUIGenerator struct {
 
 // NewGenerator 创建新的生成器实例
 func NewGenerator() (Generator, error) {
-	// TODO: 从配置中读取参数
+	// 从配置文件加载AI配置
+	aiConfig := config.GetAIConfig()
+
 	return &SDWebUIGenerator{
-		url:     "http://127.0.0.1:7860",
-		apiKey:  "",
-		timeout: 60,
+		url:     aiConfig.SDWebUI.URL,
+		apiKey:  "", // 暂时不使用API Key
+		timeout: aiConfig.SDWebUI.Timeout,
 	}, nil
 }
 
@@ -168,8 +174,9 @@ func (g *SDWebUIGenerator) GenerateImages(request *models.GenerateRequest) ([]*m
 	}
 
 	// 发送HTTP请求到SD WebUI
+	apiURL := g.url + "/sdapi/v1/txt2img"
 	client := &http.Client{Timeout: time.Duration(g.timeout) * time.Second}
-	req, err := http.NewRequest("POST", g.url+"/sdapi/v1/txt2img", bytes.NewBuffer(requestBody))
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(requestBody))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}
@@ -238,10 +245,14 @@ func (g *SDWebUIGenerator) SaveImage(image *models.GeneratedImage, savePath stri
 		return fmt.Errorf("解码base64图像失败: %v", err)
 	}
 
-	// 确保目录存在
-	dir := filepath.Dir(savePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("创建目录失败: %v", err)
+	// 使用路径管理器确保目录存在
+	pathManager := paths.GetPathManager()
+	if pathManager != nil {
+		// 确保目录存在
+		dir := filepath.Dir(savePath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("创建目录失败: %v", err)
+		}
 	}
 
 	// 写入文件
@@ -378,10 +389,12 @@ type WD14Tagger struct {
 
 // NewTagger 创建新的标签器实例
 func NewTagger() (Tagger, error) {
-	// TODO: 从配置中读取参数
+	// 从配置文件加载AI配置
+	aiConfig := config.GetAIConfig()
+
 	return &WD14Tagger{
-		url:     "http://127.0.0.1:7860",
-		timeout: 60,
+		url:     aiConfig.SDWebUI.URL, // 使用SD WebUI的URL
+		timeout: aiConfig.SDWebUI.Timeout,
 	}, nil
 }
 
@@ -436,10 +449,12 @@ type KohyaSSTrainer struct {
 
 // NewTrainer 创建新的训练器实例
 func NewTrainer() (Trainer, error) {
-	// TODO: 从配置中读取参数
+	// 从配置文件加载AI配置
+	aiConfig := config.GetAIConfig()
+
 	return &KohyaSSTrainer{
-		url:     "http://127.0.0.1:7861",
-		timeout: 60,
+		url:     aiConfig.KohyaSS.URL,
+		timeout: aiConfig.KohyaSS.Timeout,
 	}, nil
 }
 
@@ -527,4 +542,9 @@ func (m *AIManager) GetTagger() Tagger {
 // GetTrainer 获取训练器
 func (m *AIManager) GetTrainer() Trainer {
 	return m.trainer
+}
+
+// NewAIService 创建AI服务实例
+func NewAIService() (*AIManager, error) {
+	return NewAIManager()
 }

@@ -58,10 +58,10 @@ if [ -f "../pixiv-tailor" ]; then
     echo "  ./pixiv-tailor tag --input-dir \"data/images\" --output-dir \"data/tags\""
     echo ""
     echo "  # 分类标签"
-    echo "  ./pixiv-tailor classify --input \"data/tags\" --output \"configs/global_tags.json\""
+    echo "  ./pixiv-tailor classify --input \"data/tags\" --output \"global_configs/global_tags.json\""
     echo ""
     echo "🔧 配置说明:"
-    echo "  - 编辑 configs/config.json 配置文件"
+    echo "  - 编辑 global_configs/config.json 配置文件"
     echo "  - 设置Pixiv Cookie和API密钥"
     echo "  - 配置Stable Diffusion WebUI和Kohya-ss服务地址"
 else

@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
     Row,
     Col,
     Card,
     Input,
+    InputNumber,
     Button,
     Slider,
     Select,
@@ -12,441 +13,1676 @@ import {
     Space,
     Typography,
     message,
-    Divider,
-    Tooltip
+    Image,
+    Tag,
+    Table,
+    Tooltip,
+    Badge,
+    Spin,
+    Modal
 } from 'antd';
 import {
     PlayCircleOutlined,
     StopOutlined,
     DownloadOutlined,
     ClearOutlined,
-    HistoryOutlined,
     SaveOutlined,
-    CopyOutlined
+    CopyOutlined,
+    PoweroffOutlined,
+    ReloadOutlined,
+    EyeOutlined,
+    DeleteOutlined
 } from '@ant-design/icons';
+import { apiService } from '../services/api';
+import { wsManager } from '../services/websocket';
+import { GenerationParams, LoraConfig, Task, TaskStatus } from '../services/appState';
+import { aiService, AIGenerationResult } from '../services/aiService';
 
 const { TextArea } = Input;
 const { Text } = Typography;
 const { Option } = Select;
 
-interface GenerationParams {
-    prompt: string;
-    negativePrompt: string;
-    steps: number;
-    cfgScale: number;
-    width: number;
-    height: number;
-    seed: number;
-    model: string;
-    sampler: string;
-    batchSize: number;
-    enableHR: boolean;
-}
+// 默认生成参数
+const DEFAULT_PARAMS: GenerationParams = {
+    prompt: '',
+    negative_prompt: '',
+    steps: 20,
+    cfg_scale: 7.0,
+    width: 512,
+    height: 512,
+    seed: -1,
+    model: '',
+    sampler: 'DPM++ 2M Karras',
+    batch_size: 1,
+    batch_count: 1,
+    loop_count: 1,
+    enable_hr: false,
+    hr_scale: 2.0,
+    hr_upscaler: 'Latent',
+    hr_steps: 0,
+    hr_denoising_strength: 0.7
+};
 
 const AIGeneratorPage: React.FC = () => {
-    const [params, setParams] = useState<GenerationParams>({
-        prompt: '',
-        negativePrompt: '',
-        steps: 20,
-        cfgScale: 7.0,
-        width: 512,
-        height: 512,
-        seed: -1,
-        model: 'stable-diffusion-v1.5',
-        sampler: 'Euler',
-        batchSize: 1,
-        enableHR: false
-    });
-
+    // ==================== 状态管理 ====================
+    const [params, setParams] = useState<GenerationParams>(DEFAULT_PARAMS);
     const [isGenerating, setIsGenerating] = useState(false);
     const [progress, setProgress] = useState(0);
     const [generatedImages, setGeneratedImages] = useState<string[]>([]);
     const [status, setStatus] = useState('就绪');
 
-    const models = [
-        { value: 'stable-diffusion-v1.5', label: 'Stable Diffusion v1.5' },
-        { value: 'stable-diffusion-v2.1', label: 'Stable Diffusion v2.1' },
-        { value: 'dreamshaper', label: 'DreamShaper' },
-        { value: 'realistic-vision', label: 'Realistic Vision' }
-    ];
+    // 图片查看器状态
+    const [imageViewerVisible, setImageViewerVisible] = useState(false);
+    const [currentImageIndex, setCurrentImageIndex] = useState(0);
+    const [viewerImages, setViewerImages] = useState<string[]>([]);
 
-    const samplers = [
-        { value: 'Euler', label: 'Euler' },
-        { value: 'Euler a', label: 'Euler a' },
-        { value: 'DPM++ 2M', label: 'DPM++ 2M' },
-        { value: 'DDIM', label: 'DDIM' },
-        { value: 'LMS', label: 'LMS' }
-    ];
+    // 配置管理
+    const [configs, setConfigs] = useState<any[]>([]);
+    const [selectedConfig, setSelectedConfig] = useState<string>('');
+    const [configCategories, setConfigCategories] = useState<string[]>([]);
+    const [selectedCategory, setSelectedCategory] = useState<string>('');
 
-    const handleGenerate = async () => {
-        if (!params.prompt.trim()) {
-            message.error('请输入提示词');
-            return;
+    // WebUI 管理
+    const [webUIStatus, setWebUIStatus] = useState<string>('stopped');
+    const [logStream, setLogStream] = useState<EventSource | null>(null);
+
+    // LoRA 管理
+    const [loras, setLoras] = useState<LoraConfig[]>([]);
+    const [selectedLoras, setSelectedLoras] = useState<string[]>([]);
+
+    // 任务管理
+    const [tasks, setTasks] = useState<Task[]>([]);
+    const [taskLoading, setTaskLoading] = useState(false);
+    const [showTaskManagement, setShowTaskManagement] = useState(false);
+
+    // 任务详情
+    const [taskDetailVisible, setTaskDetailVisible] = useState(false);
+    const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+    const [taskLogs, setTaskLogs] = useState<string[]>([]);
+    const [taskDetailLoading, setTaskDetailLoading] = useState(false);
+    const logContainerRef = useRef<HTMLDivElement>(null);
+
+    // ==================== 配置管理 ====================
+    const loadConfigs = useCallback(async () => {
+        try {
+            const configs = await apiService.getConfigs();
+            setConfigs(Array.isArray(configs) ? configs : []);
+        } catch (error) {
+            console.error('加载配置失败:', error);
+            setConfigs([]);
         }
+    }, []);
 
-        setIsGenerating(true);
-        setProgress(0);
-        setStatus('正在生成...');
+    const loadCategories = useCallback(async () => {
+        try {
+            const categories = await apiService.getConfigCategories();
+            setConfigCategories(Array.isArray(categories) ? categories : []);
+        } catch (error) {
+            console.error('加载分类失败:', error);
+            setConfigCategories([]);
+        }
+    }, []);
 
-        // 模拟生成过程
-        const interval = setInterval(() => {
-            setProgress(prev => {
-                if (prev >= 100) {
-                    clearInterval(interval);
-                    setIsGenerating(false);
-                    setStatus('生成完成');
-                    setGeneratedImages(prev => [...prev, `generated_${Date.now()}.jpg`]);
-                    message.success('图像生成完成！');
-                    return 100;
+    const applyConfig = useCallback(async (configId: string) => {
+        try {
+            const config = await apiService.getConfig(configId);
+            if (config) {
+                setParams(prev => ({
+                    ...prev,
+                    prompt: config.prompt || '',
+                    negative_prompt: config.negative_prompt || '',
+                    steps: config.steps || 20,
+                    cfg_scale: config.cfg_scale || 7.0,
+                    width: config.width || 512,
+                    height: config.height || 512,
+                    sampler: config.sampler || 'DPM++ 2M Karras',
+                    batch_size: config.batch_size || 1,
+                    enable_hr: config.enable_hr || false,
+                    hr_scale: config.hr_scale || 2.0,
+                    hr_upscaler: config.hr_upscaler || 'Latent',
+                    hr_steps: config.hr_steps || 0,
+                    hr_denoising_strength: config.hr_denoising_strength || 0.7,
+                    loras: config.loras || [],
+                    vae: config.vae || '',
+                    restore_faces: config.restore_faces || false,
+                    tiling: config.tiling || false,
+                    clip_skip: config.clip_skip || 2
+                }));
+
+                // 设置LoRA数据
+                if (config.loras && Array.isArray(config.loras)) {
+                    setLoras(config.loras);
+                    setSelectedLoras(config.loras.map((lora: LoraConfig) => lora.lora_key));
                 }
-                return prev + 10;
-            });
-        }, 200);
-    };
 
-    const handleStop = () => {
-        setIsGenerating(false);
-        setProgress(0);
-        setStatus('已停止');
-        message.info('生成已停止');
-    };
+                message.success('配置已应用');
+            }
+        } catch (error) {
+            message.error('应用配置失败');
+        }
+    }, []);
 
-    const handleClear = () => {
-        setGeneratedImages([]);
-        setProgress(0);
-        setStatus('已清空');
-        message.info('已清空所有结果');
-    };
+    const resetToDefaultConfig = useCallback(() => {
+        // 重置为默认参数
+        setParams({
+            prompt: '',
+            negative_prompt: '',
+            steps: 20,
+            cfg_scale: 7.0,
+            width: 512,
+            height: 512,
+            seed: -1,
+            model: '',
+            sampler: 'DPM++ 2M Karras',
+            batch_size: 1,
+            batch_count: 1,
+            loop_count: 1,
+            enable_hr: false,
+            hr_scale: 2.0,
+            hr_upscaler: 'Latent',
+            hr_steps: 0,
+            hr_denoising_strength: 0.7,
+            loras: [],
+            vae: '',
+            restore_faces: false,
+            tiling: false,
+            clip_skip: 2
+        });
 
-    const handleDownload = (imageUrl: string) => {
-        // 模拟下载
-        message.success(`正在下载 ${imageUrl}`);
-    };
+        // 清空LoRA配置
+        setLoras([]);
+        setSelectedLoras([]);
 
-    const handleDownloadAll = () => {
-        if (generatedImages.length === 0) {
-            message.warning('没有可下载的图像');
+        message.success('配置已重置为默认值');
+    }, []);
+
+    // ==================== 任务管理 ====================
+    const loadTasks = useCallback(async () => {
+        try {
+            setTaskLoading(true);
+            const tasks = await apiService.getTasks();
+            setTasks(tasks || []);
+
+            // 自动加载最近完成任务的图片
+            if (tasks && tasks.length > 0) {
+                const completedTasks = tasks.filter(task => task.status === 'completed' && task.result);
+                if (completedTasks.length > 0) {
+                    // 获取最新的完成任务
+                    const latestTask = completedTasks[0];
+                    if (latestTask) {
+                        try {
+                            const result = typeof latestTask.result === 'string'
+                                ? JSON.parse(latestTask.result)
+                                : latestTask.result;
+                            if (result && result.images && Array.isArray(result.images)) {
+                                setGeneratedImages(result.images);
+                            }
+                        } catch (error) {
+                            console.error('解析任务结果失败:', error);
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('加载任务失败:', error);
+            message.error('加载任务失败');
+            setTasks([]);
+        } finally {
+            setTaskLoading(false);
+        }
+    }, []);
+
+    const handleCancelTask = useCallback(async (taskId: string) => {
+        try {
+            await apiService.cancelTask(taskId);
+            message.success('任务已取消');
+            loadTasks();
+        } catch (error) {
+            console.error('取消任务失败:', error);
+            message.error('取消任务失败');
+        }
+    }, []);
+
+    const handleDeleteTask = useCallback(async (taskId: string) => {
+        Modal.confirm({
+            title: '确认删除',
+            content: '确定要删除这个任务吗？此操作不可撤销。',
+            okText: '确定删除',
+            cancelText: '取消',
+            okType: 'danger',
+            onOk: async () => {
+                try {
+                    await apiService.deleteTask(taskId);
+                    message.success('任务已删除');
+                    loadTasks();
+                } catch (error) {
+                    console.error('删除任务失败:', error);
+                    message.error('删除任务失败');
+                }
+            }
+        });
+    }, []);
+
+    const handleBatchDelete = useCallback(() => {
+        const completedTasks = tasks?.filter(task => task.status === 'completed').length || 0;
+        const failedTasks = tasks?.filter(task => task.status === 'failed').length || 0;
+        const totalTasks = tasks?.length || 0;
+
+        // 使用Modal.info来显示选择选项
+        Modal.info({
+            title: '批量删除任务',
+            content: (
+                <div>
+                    <p>选择要删除的任务类型：</p>
+                    <div style={{ marginTop: 16 }}>
+                        <Button
+                            type="primary"
+                            danger
+                            style={{ marginRight: 8, marginBottom: 8 }}
+                            onClick={async () => {
+                                try {
+                                    const result = await apiService.cleanupTasks('completed');
+                                    await loadTasks();
+                                    message.success(`已删除 ${result.cleaned_count} 个已完成的任务`);
+                                    Modal.destroyAll();
+                                } catch (error) {
+                                    console.error('批量删除失败:', error);
+                                    message.error('批量删除失败');
+                                }
+                            }}
+                            disabled={completedTasks === 0}
+                        >
+                            删除已完成任务 ({completedTasks} 个)
+                        </Button>
+                        <Button
+                            type="primary"
+                            danger
+                            style={{ marginRight: 8, marginBottom: 8 }}
+                            onClick={async () => {
+                                try {
+                                    const result = await apiService.cleanupTasks('failed');
+                                    await loadTasks();
+                                    message.success(`已删除 ${result.cleaned_count} 个失败的任务`);
+                                    Modal.destroyAll();
+                                } catch (error) {
+                                    console.error('批量删除失败:', error);
+                                    message.error('批量删除失败');
+                                }
+                            }}
+                            disabled={failedTasks === 0}
+                        >
+                            删除失败任务 ({failedTasks} 个)
+                        </Button>
+                        <Button
+                            type="primary"
+                            danger
+                            style={{ marginRight: 8, marginBottom: 8 }}
+                            onClick={async () => {
+                                try {
+                                    const result = await apiService.cleanupTasks('all');
+                                    await loadTasks();
+                                    message.success(`已删除 ${result.cleaned_count} 个任务`);
+                                    Modal.destroyAll();
+                                } catch (error) {
+                                    console.error('批量删除失败:', error);
+                                    message.error('批量删除失败');
+                                }
+                            }}
+                            disabled={totalTasks === 0}
+                        >
+                            删除所有任务 ({totalTasks} 个)
+                        </Button>
+                    </div>
+                </div>
+            ),
+            okText: '关闭',
+            onOk: () => {
+                Modal.destroyAll();
+            }
+        });
+    }, [tasks]);
+
+    const handleViewTaskDetail = useCallback(async (taskId: string) => {
+        try {
+            setTaskDetailLoading(true);
+            setTaskDetailVisible(true);
+
+            // 获取任务详情
+            const task = await apiService.getTask(taskId);
+            setSelectedTask(task);
+
+            // 获取任务日志（这里模拟日志数据，实际应该从后端获取）
+            const logs = [
+                `任务 ${taskId} 开始执行`,
+                `配置加载完成: ${task.config_id || 'N/A'}`,
+                `开始调用 WebUI API`,
+                `WebUI 响应状态: ${task.status}`,
+                `生成进度: ${task.progress || 0}%`,
+                task.status === 'completed' ? '任务执行完成' :
+                    task.status === 'failed' ? '任务执行失败' : '任务执行中...'
+            ];
+            setTaskLogs(logs);
+
+        } catch (error) {
+            console.error('获取任务详情失败:', error);
+            message.error('获取任务详情失败');
+        } finally {
+            setTaskDetailLoading(false);
+        }
+    }, []);
+
+    const handleCloseTaskDetail = useCallback(() => {
+        setTaskDetailVisible(false);
+        setSelectedTask(null);
+        setTaskLogs([]);
+    }, []);
+
+    // ==================== 图像生成 ====================
+    const handleGenerate = useCallback(async () => {
+        if (!params.prompt.trim()) {
+            message.warning('请输入提示词');
             return;
         }
-        message.success(`正在下载 ${generatedImages.length} 张图像`);
-    };
 
-    const handleSaveConfig = () => {
-        // 保存配置到本地存储
-        localStorage.setItem('ai-generator-config', JSON.stringify(params));
-        message.success('配置已保存');
-    };
-
-    const handleLoadConfig = () => {
-        const saved = localStorage.getItem('ai-generator-config');
-        if (saved) {
-            setParams(JSON.parse(saved));
-            message.success('配置已加载');
-        } else {
-            message.warning('没有找到保存的配置');
+        if (webUIStatus !== 'running' && webUIStatus !== 'external') {
+            message.warning('请先启动 WebUI');
+            return;
         }
-    };
 
-    const handleRandomSeed = () => {
+        try {
+            setIsGenerating(true);
+            setProgress(0);
+            setStatus('正在生成...');
+            setGeneratedImages([]);
+
+            let result: AIGenerationResult;
+
+            if (selectedConfig) {
+                // 使用配置生成
+                result = await aiService.generateWithConfig(selectedConfig, params);
+            } else {
+                // 直接生成
+                result = await aiService.generateImages(params);
+            }
+
+            // 检查任务状态
+            if (result.status === 'pending' || result.status === 'running') {
+                setStatus('任务已创建，正在生成中...');
+                message.info('AI生成任务已创建，请等待生成完成');
+                // 加载任务列表以显示新任务
+                loadTasks();
+            } else if (result.images && result.images.length > 0) {
+                setGeneratedImages(result.images);
+                setStatus('生成完成');
+                message.success(`成功生成 ${result.images.length} 张图片`);
+                // 生成完成后加载任务列表
+                loadTasks();
+            } else {
+                setStatus('生成失败');
+                message.error('生成失败，请检查参数');
+            }
+        } catch (error) {
+            console.error('生成失败:', error);
+
+            // 检查是否是并发限制错误
+            if (error instanceof Error && error.message.includes('429')) {
+                setStatus('等待中...');
+                message.warning('请等待当前生成任务完成后再试');
+                // 不设置isGenerating为false，保持等待状态
+                return;
+            }
+
+            setStatus('生成失败');
+            message.error(`生成失败: ${error instanceof Error ? error.message : '未知错误'}`);
+        } finally {
+            // 只有在非等待状态时才设置为false
+            if (status !== '等待中...') {
+                setIsGenerating(false);
+                setProgress(0);
+            }
+        }
+    }, [params, selectedConfig, webUIStatus]);
+
+    const handleStop = useCallback(async () => {
+        try {
+            setIsGenerating(false);
+            setProgress(0);
+            setStatus('已停止');
+            message.info('生成已停止');
+        } catch (error) {
+            console.error('停止失败:', error);
+        }
+    }, []);
+
+    // ==================== WebUI 管理 ====================
+    const handleStartWebUI = useCallback(async () => {
+        try {
+            const response = await fetch('http://localhost:50052/api/webui/start-external', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            if (response.ok) {
+                setWebUIStatus('starting');
+                message.success('正在启动 WebUI，请查看弹出的命令行窗口');
+                startWebUIStatusMonitoring();
+            } else {
+                const errorData = await response.json();
+                message.error(`启动WebUI失败: ${errorData.message || '未知错误'}`);
+            }
+        } catch (error) {
+            message.error(`启动WebUI失败: ${error instanceof Error ? error.message : '未知错误'}`);
+        }
+    }, []);
+
+    const handleStopWebUI = useCallback(async () => {
+        try {
+            const result = await apiService.stopWebUI();
+            setWebUIStatus('stopped');
+            message.success(result.message);
+
+            if (logStream) {
+                logStream.close();
+                setLogStream(null);
+            }
+        } catch (error) {
+            message.error(`停止WebUI失败: ${error instanceof Error ? error.message : '未知错误'}`);
+        }
+    }, [logStream]);
+
+    const startWebUIStatusMonitoring = useCallback(async () => {
+        const checkStatus = async () => {
+            try {
+                const status = await apiService.getWebUIStatus();
+                setWebUIStatus(status.status);
+
+                if (status.status === 'running' || status.status === 'external') {
+                    if (!logStream) {
+                        startLogStream();
+                    }
+                } else if (status.status === 'stopped') {
+                    if (logStream) {
+                        logStream.close();
+                        setLogStream(null);
+                    }
+                }
+
+                // 无论什么状态都继续检查，实现实时更新
+                setTimeout(checkStatus, 3000);
+            } catch (error) {
+                // 静默处理错误
+                setTimeout(checkStatus, 5000);
+            }
+        };
+
+        checkStatus();
+    }, []); // 空依赖数组，避免因logStream变化导致函数重新创建
+
+    const startLogStream = useCallback(() => {
+        if (logStream) {
+            logStream.close();
+        }
+
+        const stream = apiService.createWebUILogStream();
+        setLogStream(stream);
+
+        stream.onopen = () => {
+            // 连接已打开，静默处理
+        };
+
+        stream.onmessage = (event) => {
+            // 静默处理日志消息
+            event.data; // 避免未使用变量警告
+        };
+
+        stream.onerror = () => {
+            // 静默处理错误，不输出日志
+            if (stream.readyState === EventSource.CLOSED) {
+                setLogStream(null);
+
+                setTimeout(() => {
+                    if (webUIStatus === 'running' && !logStream) {
+                        startLogStream();
+                    }
+                }, 5000);
+            }
+        };
+    }, [logStream, webUIStatus]);
+
+    // ==================== 工具函数 ====================
+    const handleRandomSeed = useCallback(() => {
         setParams(prev => ({ ...prev, seed: Math.floor(Math.random() * 1000000) }));
+    }, []);
+
+    const handleClearImages = useCallback(() => {
+        setGeneratedImages([]);
+        message.info('已清空图片');
+    }, []);
+
+    // 图片查看器相关函数
+    const handleImageClick = useCallback((_imageUrl: string, index: number) => {
+        setViewerImages(generatedImages);
+        setCurrentImageIndex(index);
+        setImageViewerVisible(true);
+    }, [generatedImages]);
+
+    const handlePrevImage = useCallback(() => {
+        setCurrentImageIndex(prev => prev > 0 ? prev - 1 : viewerImages.length - 1);
+    }, [viewerImages.length]);
+
+    const handleNextImage = useCallback(() => {
+        setCurrentImageIndex(prev => prev < viewerImages.length - 1 ? prev + 1 : 0);
+    }, [viewerImages.length]);
+
+    const handleCloseViewer = useCallback(() => {
+        setImageViewerVisible(false);
+    }, []);
+
+    // 键盘导航支持
+    useEffect(() => {
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (!imageViewerVisible) return;
+
+            switch (event.key) {
+                case 'ArrowLeft':
+                    event.preventDefault();
+                    handlePrevImage();
+                    break;
+                case 'ArrowRight':
+                    event.preventDefault();
+                    handleNextImage();
+                    break;
+                case 'Escape':
+                    event.preventDefault();
+                    handleCloseViewer();
+                    break;
+            }
+        };
+
+        document.addEventListener('keydown', handleKeyDown);
+        return () => document.removeEventListener('keydown', handleKeyDown);
+    }, [imageViewerVisible, handlePrevImage, handleNextImage, handleCloseViewer]);
+
+    const handleDownloadImage = useCallback((imageUrl: string, index: number) => {
+        const link = document.createElement('a');
+        link.href = imageUrl;
+        link.download = `generated_image_${index + 1}.png`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        message.success('图片下载已开始');
+    }, []);
+
+    const handleCopyPrompt = useCallback(() => {
+        navigator.clipboard.writeText(params.prompt);
+        message.success('提示词已复制到剪贴板');
+    }, [params.prompt]);
+
+    // ==================== 任务表格列定义 ====================
+    const taskColumns = [
+        {
+            title: '任务名称',
+            dataIndex: 'name',
+            key: 'name',
+            render: (text: string, record: Task) => (
+                <Space>
+                    <Text strong>{text || `AI生成任务-${record.id.slice(-8)}`}</Text>
+                    {record.status === 'running' && <Badge status="processing" />}
+                    {record.status === 'completed' && <Badge status="success" />}
+                    {record.status === 'failed' && <Badge status="error" />}
+                </Space>
+            )
+        },
+        {
+            title: '状态',
+            dataIndex: 'status',
+            key: 'status',
+            render: (status: TaskStatus) => {
+                const statusMap = {
+                    pending: { color: 'default', text: '等待中' },
+                    running: { color: 'processing', text: '运行中' },
+                    completed: { color: 'success', text: '已完成' },
+                    failed: { color: 'error', text: '失败' },
+                    cancelled: { color: 'warning', text: '已取消' }
+                };
+                const config = statusMap[status] || { color: 'default', text: status };
+                return <Tag color={config.color}>{config.text}</Tag>;
+            }
+        },
+        {
+            title: '进度',
+            dataIndex: 'progress',
+            key: 'progress',
+            render: (progress: number, record: Task) => (
+                <Progress
+                    percent={progress}
+                    size="small"
+                    status={record.status === 'failed' ? 'exception' : 'active'}
+                />
+            )
+        },
+        {
+            title: '生成数量',
+            key: 'images',
+            render: (record: Task) => (
+                <Space direction="vertical" size="small">
+                    <div>
+                        <Text type="secondary">生成: </Text>
+                        <Text strong style={{ color: '#1890ff' }}>
+                            {record.images_generated || 0}
+                        </Text>
+                    </div>
+                    <div>
+                        <Text type="secondary">成功: </Text>
+                        <Text strong style={{ color: '#52c41a' }}>
+                            {record.images_success || 0}
+                        </Text>
+                    </div>
+                </Space>
+            )
+        },
+        {
+            title: '开始时间',
+            dataIndex: 'created_at',
+            key: 'created_at',
+            render: (time: string) => new Date(time).toLocaleString()
+        },
+        {
+            title: '操作',
+            key: 'actions',
+            render: (_: any, record: Task) => (
+                <Space>
+                    {record.status === 'running' && (
+                        <Tooltip title="取消">
+                            <Button
+                                type="text"
+                                icon={<StopOutlined />}
+                                onClick={() => handleCancelTask(record.id)}
+                            />
+                        </Tooltip>
+                    )}
+                    <Tooltip title="查看详情">
+                        <Button
+                            type="text"
+                            icon={<EyeOutlined />}
+                            onClick={() => handleViewTaskDetail(record.id)}
+                        />
+                    </Tooltip>
+                    <Tooltip title="删除">
+                        <Button
+                            type="text"
+                            icon={<DeleteOutlined />}
+                            danger
+                            onClick={() => handleDeleteTask(record.id)}
+                        />
+                    </Tooltip>
+                </Space>
+            )
+        }
+    ];
+
+    // ==================== 生命周期 ====================
+    useEffect(() => {
+        loadConfigs();
+        loadCategories();
+        loadTasks(); // 添加任务加载
+        startWebUIStatusMonitoring();
+
+        // WebSocket任务更新监听
+        const handleTaskUpdate = (data: any) => {
+            console.log('收到任务更新:', data);
+            if (data.task_id && data.data) {
+                setTasks(prevTasks => {
+                    const updatedTasks = [...prevTasks];
+                    const taskIndex = updatedTasks.findIndex(task => task.id === data.task_id);
+                    if (taskIndex !== -1) {
+                        // 更新现有任务
+                        updatedTasks[taskIndex] = {
+                            ...updatedTasks[taskIndex],
+                            ...data.data,
+                            id: data.task_id // 确保ID正确
+                        };
+                        console.log('更新任务:', updatedTasks[taskIndex]);
+                    } else if (data.data.status === 'running' || data.data.status === 'pending') {
+                        // 新任务，添加到列表
+                        const newTask = {
+                            id: data.task_id,
+                            ...data.data
+                        };
+                        updatedTasks.unshift(newTask);
+                        console.log('添加新任务:', newTask);
+                    }
+                    return updatedTasks;
+                });
+
+                // 如果任务完成且有图片，更新生成结果
+                if (data.data.status === 'completed' && data.data.result && data.data.result.images) {
+                    const images = data.data.result.images;
+                    if (Array.isArray(images) && images.length > 0) {
+                        setGeneratedImages(images);
+                        setStatus('生成完成');
+                        message.success(`成功生成 ${images.length} 张图片`);
+                    }
+                }
+
+                // 如果任务完成且当前处于等待状态，重置状态
+                if (data.data.status === 'completed' && status === '等待中...') {
+                    setIsGenerating(false);
+                    setStatus('就绪');
+                    message.info('上一个任务已完成，可以开始新的生成');
+                }
+
+                // 更新任务列表后，检查是否有最近完成的任务图片
+                setTimeout(() => {
+                    const completedTasks = tasks.filter(task => task.status === 'completed' && task.result);
+                    if (completedTasks.length > 0) {
+                        // 获取最新的完成任务
+                        const latestTask = completedTasks[0];
+                        if (latestTask) {
+                            try {
+                                const result = typeof latestTask.result === 'string'
+                                    ? JSON.parse(latestTask.result)
+                                    : latestTask.result;
+                                if (result && result.images && Array.isArray(result.images)) {
+                                    setGeneratedImages(result.images);
+                                }
+                            } catch (error) {
+                                console.error('解析任务结果失败:', error);
+                            }
+                        }
+                    }
+                }, 100);
+            }
+        };
+
+        const handleLogMessage = (data: any) => {
+            console.log('收到日志消息:', data);
+            // 如果当前有打开的任务详情，且日志属于该任务，则更新日志
+            if (selectedTask && data.task_id === selectedTask.id) {
+                setTaskLogs(prevLogs => {
+                    const newLogs = [...prevLogs, data.message || data.data?.message || '未知日志'];
+                    // 自动滚动到底部
+                    setTimeout(() => {
+                        if (logContainerRef.current) {
+                            logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+                        }
+                    }, 100);
+                    return newLogs;
+                });
+            }
+        };
+
+        // 注册WebSocket事件监听器
+        wsManager.on('task_update', handleTaskUpdate);
+        wsManager.on('log_message', handleLogMessage);
+        wsManager.on('global_log', handleLogMessage);
+
+        return () => {
+            if (logStream) {
+                logStream.close();
+            }
+            // 清理WebSocket监听器
+            wsManager.off('task_update', handleTaskUpdate);
+            wsManager.off('log_message', handleLogMessage);
+            wsManager.off('global_log', handleLogMessage);
+        };
+    }, []); // 空依赖数组，只在组件挂载时执行一次
+
+    // ==================== 渲染函数 ====================
+    const renderWebUIStatus = () => {
+        const getStatusColor = (status: string) => {
+            switch (status) {
+                case 'running':
+                case 'external':
+                    return '#52c41a';
+                case 'starting':
+                    return '#faad14';
+                case 'stopped':
+                    return '#ff4d4f';
+                default:
+                    return '#d9d9d9';
+            }
+        };
+
+        const getStatusText = (status: string) => {
+            switch (status) {
+                case 'running':
+                    return '运行中 (内部管理)';
+                case 'external':
+                    return '运行中 (外部启动)';
+                case 'starting':
+                    return '启动中...';
+                case 'stopped':
+                    return '已停止';
+                default:
+                    return '未知状态';
+            }
+        };
+
+        return (
+            <Space>
+                <Text strong>WebUI状态:</Text>
+                <Text style={{ color: getStatusColor(webUIStatus) }}>
+                    {getStatusText(webUIStatus)}
+                </Text>
+                {webUIStatus === 'stopped' ? (
+                    <Button
+                        type="primary"
+                        icon={<PoweroffOutlined />}
+                        onClick={handleStartWebUI}
+                        size="small"
+                    >
+                        启动 WebUI
+                    </Button>
+                ) : (
+                    <Button
+                        danger
+                        icon={<StopOutlined />}
+                        onClick={handleStopWebUI}
+                        size="small"
+                    >
+                        停止 WebUI
+                    </Button>
+                )}
+            </Space>
+        );
     };
 
-    return (
-        <div>
-            <Row gutter={[24, 24]}>
-                {/* 左侧控制面板 */}
-                <Col xs={24} lg={8}>
-                    <Space direction="vertical" size="large" style={{ width: '100%' }}>
-                        {/* 提示词输入 */}
-                        <Card title="🎨 提示词设置" size="small">
-                            <Space direction="vertical" style={{ width: '100%' }} size="middle">
-                                <div>
-                                    <Text strong>正面提示词</Text>
-                                    <TextArea
-                                        value={params.prompt}
-                                        onChange={(e) => setParams(prev => ({ ...prev, prompt: e.target.value }))}
-                                        placeholder="描述你想要生成的图像..."
-                                        rows={4}
-                                        maxLength={1000}
-                                        showCount
-                                        style={{ marginTop: 8 }}
-                                    />
-                                </div>
-                                <div>
-                                    <Text strong>负面提示词</Text>
-                                    <TextArea
-                                        value={params.negativePrompt}
-                                        onChange={(e) => setParams(prev => ({ ...prev, negativePrompt: e.target.value }))}
-                                        placeholder="描述你不想要的内容..."
-                                        rows={2}
-                                        maxLength={500}
-                                        showCount
-                                        style={{ marginTop: 8 }}
-                                    />
-                                </div>
-                            </Space>
-                        </Card>
-
-                        {/* 生成参数 */}
-                        <Card title="⚙️ 生成参数" size="small">
-                            <Space direction="vertical" style={{ width: '100%' }} size="middle">
-                                <div>
-                                    <Text strong>采样步数: {params.steps}</Text>
-                                    <Slider
-                                        min={1}
-                                        max={100}
-                                        value={params.steps}
-                                        onChange={(value) => setParams(prev => ({ ...prev, steps: value }))}
-                                        marks={{ 1: '1', 20: '20', 50: '50', 100: '100' }}
-                                    />
-                                </div>
-                                <div>
-                                    <Text strong>CFG Scale: {params.cfgScale}</Text>
-                                    <Slider
-                                        min={1}
-                                        max={30}
-                                        step={0.5}
-                                        value={params.cfgScale}
-                                        onChange={(value) => setParams(prev => ({ ...prev, cfgScale: value }))}
-                                        marks={{ 1: '1', 7: '7', 15: '15', 30: '30' }}
-                                    />
-                                </div>
-                                <Row gutter={16}>
-                                    <Col span={12}>
-                                        <Text strong>宽度: {params.width}</Text>
-                                        <Slider
-                                            min={64}
-                                            max={2048}
-                                            step={64}
-                                            value={params.width}
-                                            onChange={(value) => setParams(prev => ({ ...prev, width: value }))}
-                                            marks={{ 64: '64', 512: '512', 1024: '1024', 2048: '2048' }}
-                                        />
-                                    </Col>
-                                    <Col span={12}>
-                                        <Text strong>高度: {params.height}</Text>
-                                        <Slider
-                                            min={64}
-                                            max={2048}
-                                            step={64}
-                                            value={params.height}
-                                            onChange={(value) => setParams(prev => ({ ...prev, height: value }))}
-                                            marks={{ 64: '64', 512: '512', 1024: '1024', 2048: '2048' }}
-                                        />
-                                    </Col>
-                                </Row>
-                                <div>
-                                    <Text strong>随机种子: {params.seed === -1 ? '随机' : params.seed}</Text>
-                                    <Space style={{ marginTop: 8 }}>
-                                        <Input
-                                            type="number"
-                                            value={params.seed === -1 ? '' : params.seed}
-                                            onChange={(e) => setParams(prev => ({
-                                                ...prev,
-                                                seed: e.target.value ? parseInt(e.target.value) : -1
-                                            }))}
-                                            placeholder="-1 (随机)"
-                                            style={{ width: 120 }}
-                                        />
-                                        <Button onClick={handleRandomSeed}>随机</Button>
-                                    </Space>
-                                </div>
-                            </Space>
-                        </Card>
-
-                        {/* 高级设置 */}
-                        <Card title="🔧 高级设置" size="small">
-                            <Space direction="vertical" style={{ width: '100%' }} size="middle">
-                                <div>
-                                    <Text strong>模型选择</Text>
-                                    <Select
-                                        value={params.model}
-                                        onChange={(value) => setParams(prev => ({ ...prev, model: value }))}
-                                        style={{ width: '100%', marginTop: 8 }}
-                                    >
-                                        {models.map(model => (
-                                            <Option key={model.value} value={model.value}>
-                                                {model.label}
-                                            </Option>
-                                        ))}
-                                    </Select>
-                                </div>
-                                <div>
-                                    <Text strong>采样器</Text>
-                                    <Select
-                                        value={params.sampler}
-                                        onChange={(value) => setParams(prev => ({ ...prev, sampler: value }))}
-                                        style={{ width: '100%', marginTop: 8 }}
-                                    >
-                                        {samplers.map(sampler => (
-                                            <Option key={sampler.value} value={sampler.value}>
-                                                {sampler.label}
-                                            </Option>
-                                        ))}
-                                    </Select>
-                                </div>
-                                <div>
-                                    <Text strong>批次大小: {params.batchSize}</Text>
-                                    <Slider
-                                        min={1}
-                                        max={8}
-                                        value={params.batchSize}
-                                        onChange={(value) => setParams(prev => ({ ...prev, batchSize: value }))}
-                                        marks={{ 1: '1', 4: '4', 8: '8' }}
-                                    />
-                                </div>
-                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                                    <Text strong>高分辨率修复</Text>
-                                    <Switch
-                                        checked={params.enableHR}
-                                        onChange={(checked) => setParams(prev => ({ ...prev, enableHR: checked }))}
-                                    />
-                                </div>
-                            </Space>
-                        </Card>
-
-                        {/* 控制按钮 */}
-                        <Card size="small">
-                            <Space direction="vertical" style={{ width: '100%' }} size="middle">
-                                <Row gutter={8}>
-                                    <Col span={12}>
-                                        <Button
-                                            type="primary"
-                                            size="large"
-                                            icon={<PlayCircleOutlined />}
-                                            onClick={handleGenerate}
-                                            loading={isGenerating}
-                                            block
-                                            style={{ height: 48 }}
-                                        >
-                                            {isGenerating ? '生成中...' : '开始生成'}
-                                        </Button>
-                                    </Col>
-                                    <Col span={12}>
-                                        <Button
-                                            danger
-                                            size="large"
-                                            icon={<StopOutlined />}
-                                            onClick={handleStop}
-                                            disabled={!isGenerating}
-                                            block
-                                            style={{ height: 48 }}
-                                        >
-                                            停止
-                                        </Button>
-                                    </Col>
-                                </Row>
-
-                                <div>
-                                    <Text strong>生成进度</Text>
-                                    <Progress
-                                        percent={progress}
-                                        status={isGenerating ? 'active' : 'normal'}
-                                        strokeColor={{
-                                            '0%': '#108ee9',
-                                            '100%': '#87d068',
-                                        }}
-                                    />
-                                </div>
-
-                                <div>
-                                    <Text strong>状态: </Text>
-                                    <Text type={isGenerating ? 'warning' : 'success'}>{status}</Text>
-                                </div>
-
-                                <Divider />
-
-                                <Space wrap>
-                                    <Button icon={<SaveOutlined />} onClick={handleSaveConfig}>
-                                        保存配置
-                                    </Button>
-                                    <Button icon={<HistoryOutlined />} onClick={handleLoadConfig}>
-                                        加载配置
-                                    </Button>
-                                    <Button icon={<ClearOutlined />} onClick={handleClear}>
-                                        清空结果
-                                    </Button>
-                                </Space>
-                            </Space>
-                        </Card>
+    const renderParameterControls = () => (
+        <Card title="生成参数" size="small">
+            <Row gutter={[16, 16]}>
+                <Col span={24}>
+                    <Space direction="vertical" style={{ width: '100%' }}>
+                        <div>
+                            <Text strong>提示词:</Text>
+                            <TextArea
+                                value={params.prompt}
+                                onChange={(e) => setParams(prev => ({ ...prev, prompt: e.target.value }))}
+                                placeholder="输入提示词..."
+                                maxLength={1000}
+                                showCount
+                                autoSize={false}
+                                style={{
+                                    width: '100%',
+                                    height: '100px',
+                                    resize: 'none',
+                                    fontSize: '14px',
+                                    lineHeight: '1.5',
+                                    overflow: 'hidden'
+                                }}
+                            />
+                        </div>
+                        <div>
+                            <Text strong>负面提示词:</Text>
+                            <TextArea
+                                value={params.negative_prompt}
+                                onChange={(e) => setParams(prev => ({ ...prev, negative_prompt: e.target.value }))}
+                                placeholder="输入负面提示词..."
+                                maxLength={500}
+                                showCount
+                                autoSize={false}
+                                style={{
+                                    width: '100%',
+                                    height: '80px',
+                                    resize: 'none',
+                                    fontSize: '14px',
+                                    lineHeight: '1.5',
+                                    overflow: 'hidden'
+                                }}
+                            />
+                        </div>
                     </Space>
                 </Col>
 
-                {/* 右侧输出区域 */}
-                <Col xs={24} lg={16}>
-                    <Card
-                        title="🖼️ 生成结果"
-                        extra={
-                            <Space>
-                                <Button
-                                    icon={<DownloadOutlined />}
-                                    onClick={handleDownloadAll}
-                                    disabled={generatedImages.length === 0}
-                                >
-                                    下载全部
-                                </Button>
-                                <Button
-                                    icon={<ClearOutlined />}
-                                    onClick={handleClear}
-                                    disabled={generatedImages.length === 0}
-                                >
-                                    清空
-                                </Button>
-                            </Space>
-                        }
+                <Col span={12}>
+                    <Text strong>步数: {params.steps}</Text>
+                    <Slider
+                        min={1}
+                        max={150}
+                        value={params.steps}
+                        onChange={(value) => setParams(prev => ({ ...prev, steps: value }))}
+                    />
+                </Col>
+
+                <Col span={12}>
+                    <Text strong>CFG Scale: {params.cfg_scale}</Text>
+                    <Slider
+                        min={1}
+                        max={30}
+                        step={0.5}
+                        value={params.cfg_scale}
+                        onChange={(value) => setParams(prev => ({ ...prev, cfg_scale: value }))}
+                    />
+                </Col>
+
+                <Col span={8}>
+                    <Text strong>宽度:</Text>
+                    <InputNumber
+                        value={params.width}
+                        onChange={(value) => setParams(prev => ({ ...prev, width: value || 512 }))}
+                        min={64}
+                        max={2048}
+                        step={64}
+                        style={{ width: '100%' }}
+                    />
+                </Col>
+
+                <Col span={8}>
+                    <Text strong>高度:</Text>
+                    <InputNumber
+                        value={params.height}
+                        onChange={(value) => setParams(prev => ({ ...prev, height: value || 512 }))}
+                        min={64}
+                        max={2048}
+                        step={64}
+                        style={{ width: '100%' }}
+                    />
+                </Col>
+
+                <Col span={8}>
+                    <Text strong>种子:</Text>
+                    <InputNumber
+                        value={params.seed}
+                        onChange={(value) => setParams(prev => ({ ...prev, seed: value || -1 }))}
+                        min={-1}
+                        max={2147483647}
+                        style={{ width: '100%' }}
+                    />
+                    <Button
+                        size="small"
+                        onClick={handleRandomSeed}
+                        style={{ marginTop: 4 }}
                     >
-                        {generatedImages.length === 0 ? (
-                            <div style={{
-                                textAlign: 'center',
-                                padding: '60px 20px',
-                                background: '#fafafa',
-                                borderRadius: 8,
-                                border: '2px dashed #d9d9d9'
-                            }}>
-                                <div style={{ fontSize: 48, marginBottom: 16 }}>🎨</div>
-                                <Text type="secondary" style={{ fontSize: 16 }}>
-                                    生成结果将显示在这里
-                                </Text>
-                            </div>
-                        ) : (
-                            <Row gutter={[16, 16]}>
-                                {generatedImages.map((image, index) => (
-                                    <Col xs={24} sm={12} md={8} key={index}>
-                                        <Card
-                                            hoverable
-                                            cover={
-                                                <div style={{
-                                                    height: 200,
-                                                    background: '#f0f0f0',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    justifyContent: 'center',
-                                                    fontSize: 48
-                                                }}>
-                                                    🖼️
-                                                </div>
-                                            }
-                                            actions={[
-                                                <Tooltip title="下载">
-                                                    <DownloadOutlined onClick={() => handleDownload(image)} />
-                                                </Tooltip>,
-                                                <Tooltip title="复制">
-                                                    <CopyOutlined />
-                                                </Tooltip>
-                                            ]}
-                                        >
-                                            <Card.Meta
-                                                title={`生成图像 ${index + 1}`}
-                                                description={`${params.width} × ${params.height}`}
-                                            />
-                                        </Card>
-                                    </Col>
-                                ))}
-                            </Row>
+                        随机
+                    </Button>
+                </Col>
+
+                <Col span={12}>
+                    <Text strong>采样器:</Text>
+                    <Select
+                        value={params.sampler}
+                        onChange={(value) => setParams(prev => ({ ...prev, sampler: value }))}
+                        style={{ width: '100%' }}
+                    >
+                        <Option value="DPM++ 2M Karras">DPM++ 2M Karras</Option>
+                        <Option value="DPM++ SDE Karras">DPM++ SDE Karras</Option>
+                        <Option value="Euler a">Euler a</Option>
+                        <Option value="Euler">Euler</Option>
+                        <Option value="LMS">LMS</Option>
+                        <Option value="Heun">Heun</Option>
+                        <Option value="DPM2">DPM2</Option>
+                        <Option value="DPM2 a">DPM2 a</Option>
+                        <Option value="DPM++ 2S a">DPM++ 2S a</Option>
+                        <Option value="DPM++ 2M">DPM++ 2M</Option>
+                        <Option value="DPM++ SDE">DPM++ SDE</Option>
+                        <Option value="DPM fast">DPM fast</Option>
+                        <Option value="DPM adaptive">DPM adaptive</Option>
+                        <Option value="LMS Karras">LMS Karras</Option>
+                        <Option value="DPM2 Karras">DPM2 Karras</Option>
+                        <Option value="DPM2 a Karras">DPM2 a Karras</Option>
+                        <Option value="DPM++ 2S a Karras">DPM++ 2S a Karras</Option>
+                    </Select>
+                </Col>
+
+                <Col span={12}>
+                    <Text strong>批次大小: {params.batch_size}</Text>
+                    <Slider
+                        min={1}
+                        max={8}
+                        value={params.batch_size}
+                        onChange={(value) => setParams(prev => ({ ...prev, batch_size: value }))}
+                    />
+                </Col>
+
+                <Col span={12}>
+                    <Text strong>批次数量: {params.batch_count}</Text>
+                    <Slider
+                        min={1}
+                        max={10}
+                        value={params.batch_count}
+                        onChange={(value) => setParams(prev => ({ ...prev, batch_count: value }))}
+                    />
+                </Col>
+
+                <Col span={12}>
+                    <Text strong>循环数量: {params.loop_count}</Text>
+                    <Slider
+                        min={1}
+                        max={20}
+                        value={params.loop_count}
+                        onChange={(value) => setParams(prev => ({ ...prev, loop_count: value }))}
+                    />
+                    <Text type="secondary" style={{ fontSize: '12px' }}>
+                        发包次数，每次发包间隔2秒
+                    </Text>
+                </Col>
+
+                <Col span={24}>
+                    <Space>
+                        <Text strong>高分辨率修复:</Text>
+                        <Switch
+                            checked={params.enable_hr}
+                            onChange={(checked) => setParams(prev => ({ ...prev, enable_hr: checked }))}
+                        />
+                        {params.enable_hr && (
+                            <>
+                                <Text strong>放大倍数: {params.hr_scale}</Text>
+                                <Slider
+                                    min={1}
+                                    max={4}
+                                    step={0.1}
+                                    value={params.hr_scale}
+                                    onChange={(value) => setParams(prev => ({ ...prev, hr_scale: value }))}
+                                    style={{ width: 100 }}
+                                />
+                            </>
                         )}
-                    </Card>
+                    </Space>
                 </Col>
             </Row>
+
+            {/* LoRA 配置 - 固定高度区域 */}
+            <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+                <Col span={24}>
+                    <Text strong>LoRA 模型:</Text>
+                    <div style={{
+                        marginTop: 8,
+                        height: '200px',
+                        overflow: 'auto',
+                        border: '1px solid #f0f0f0',
+                        borderRadius: '6px',
+                        padding: '8px',
+                        backgroundColor: '#fafafa'
+                    }}>
+                        {loras.length > 0 ? (
+                            loras.map((lora) => (
+                                <div key={lora.lora_key} style={{
+                                    marginBottom: 8,
+                                    padding: 8,
+                                    border: '1px solid #d9d9d9',
+                                    borderRadius: 4,
+                                    backgroundColor: selectedLoras.includes(lora.lora_key) ? '#f0f8ff' : '#ffffff'
+                                }}>
+                                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <Text strong style={{ fontSize: 12 }}>{lora.name}</Text>
+                                            <Text style={{ fontSize: 11, color: '#666' }}>权重: {lora.weight}</Text>
+                                        </div>
+                                        {lora.description && (
+                                            <Text style={{ fontSize: 11, color: '#666' }}>{lora.description}</Text>
+                                        )}
+                                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                                            {lora.tags && lora.tags.map(tag => (
+                                                <Tag key={tag} color="blue">{tag}</Tag>
+                                            ))}
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <Switch
+                                                size="small"
+                                                checked={selectedLoras.includes(lora.lora_key)}
+                                                onChange={(checked) => {
+                                                    if (checked) {
+                                                        setSelectedLoras(prev => [...prev, lora.lora_key]);
+                                                    } else {
+                                                        setSelectedLoras(prev => prev.filter(key => key !== lora.lora_key));
+                                                    }
+                                                }}
+                                            />
+                                            <Text style={{ fontSize: 10, color: '#999' }}>{lora.path}</Text>
+                                        </div>
+                                    </Space>
+                                </div>
+                            ))
+                        ) : (
+                            <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                height: '100%',
+                                color: '#999',
+                                fontSize: '14px'
+                            }}>
+                                暂无 LoRA 模型
+                            </div>
+                        )}
+                    </div>
+                </Col>
+            </Row>
+        </Card>
+    );
+
+    const renderConfigSelector = () => (
+        <Card title="配置管理" size="small">
+            <Row gutter={[16, 16]}>
+                <Col span={12}>
+                    <Text strong>分类:</Text>
+                    <Select
+                        value={selectedCategory}
+                        onChange={(value) => {
+                            setSelectedCategory(value);
+                            setSelectedConfig('');
+                        }}
+                        style={{ width: '100%' }}
+                        placeholder="选择分类"
+                        allowClear
+                    >
+                        {(Array.isArray(configCategories) ? configCategories : []).map(category => (
+                            <Option key={category} value={category}>{category}</Option>
+                        ))}
+                    </Select>
+                </Col>
+
+                <Col span={12}>
+                    <Text strong>配置:</Text>
+                    <Select
+                        value={selectedConfig}
+                        onChange={(value) => {
+                            setSelectedConfig(value);
+                            if (value === 'none') {
+                                // 重置为默认配置
+                                resetToDefaultConfig();
+                            } else if (value) {
+                                applyConfig(value);
+                            }
+                        }}
+                        style={{ width: '100%' }}
+                        placeholder="选择配置"
+                        allowClear
+                    >
+                        <Option key="none" value="none">无 (重置配置)</Option>
+                        {(Array.isArray(configs) ? configs : [])
+                            .filter(config => !selectedCategory || config.category === selectedCategory)
+                            .map(config => (
+                                <Option key={config.id} value={config.id}>{config.name}</Option>
+                            ))}
+                    </Select>
+                </Col>
+
+                <Col span={24}>
+                    <Space>
+                        <Button
+                            icon={<ReloadOutlined />}
+                            onClick={loadConfigs}
+                            size="small"
+                        >
+                            刷新配置
+                        </Button>
+                        <Button
+                            icon={<SaveOutlined />}
+                            size="small"
+                        >
+                            应用配置
+                        </Button>
+                    </Space>
+                </Col>
+            </Row>
+        </Card>
+    );
+
+    const renderControlButtons = () => (
+        <Card title="控制面板" size="small">
+            <Space direction="vertical" style={{ width: '100%' }}>
+                <Space>
+                    <Button
+                        type="primary"
+                        icon={<PlayCircleOutlined />}
+                        onClick={handleGenerate}
+                        loading={isGenerating}
+                        disabled={webUIStatus !== 'running' && webUIStatus !== 'external'}
+                        size="large"
+                    >
+                        {isGenerating ? (status === '等待中...' ? '等待中...' : '生成中...') : '开始生成'}
+                    </Button>
+
+                    <Button
+                        danger
+                        icon={<StopOutlined />}
+                        onClick={handleStop}
+                        disabled={!isGenerating}
+                        size="large"
+                    >
+                        停止生成
+                    </Button>
+                </Space>
+
+                <Space>
+                    <Button
+                        icon={<CopyOutlined />}
+                        onClick={handleCopyPrompt}
+                        size="small"
+                    >
+                        复制提示词
+                    </Button>
+
+                    <Button
+                        icon={<ClearOutlined />}
+                        onClick={handleClearImages}
+                        size="small"
+                    >
+                        清空图片
+                    </Button>
+                </Space>
+
+                {isGenerating && (
+                    <div>
+                        <Text strong>生成进度:</Text>
+                        <Progress percent={progress} status="active" />
+                        <Text type="secondary">{status}</Text>
+                    </div>
+                )}
+            </Space>
+        </Card>
+    );
+
+    const renderGeneratedImages = () => (
+        <Card title="生成结果" size="small" style={{ height: '825px', overflow: 'auto' }}>
+            {generatedImages.length > 0 ? (
+                <Row gutter={[12, 12]}>
+                    {generatedImages.map((imageUrl, index) => (
+                        <Col span={24} key={index}>
+                            <Card
+                                size="small"
+                                cover={
+                                    <div
+                                        style={{
+                                            cursor: 'pointer',
+                                            position: 'relative'
+                                        }}
+                                        onClick={() => handleImageClick(imageUrl, index)}
+                                    >
+                                        <Image
+                                            src={imageUrl}
+                                            alt={`Generated ${index + 1}`}
+                                            style={{
+                                                height: 150,
+                                                objectFit: 'contain',
+                                                backgroundColor: '#f8f8f8'
+                                            }}
+                                            placeholder={<div style={{ height: 150, background: '#f0f0f0', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>加载中...</div>}
+                                        />
+                                        <div style={{
+                                            position: 'absolute',
+                                            top: 8,
+                                            right: 8,
+                                            background: 'rgba(0,0,0,0.6)',
+                                            color: 'white',
+                                            padding: '2px 6px',
+                                            borderRadius: '4px',
+                                            fontSize: '12px'
+                                        }}>
+                                            {index + 1}/{generatedImages.length}
+                                        </div>
+                                    </div>
+                                }
+                                actions={[
+                                    <Button
+                                        key="download"
+                                        icon={<DownloadOutlined />}
+                                        onClick={() => handleDownloadImage(imageUrl, index)}
+                                        size="small"
+                                        type="primary"
+                                    >
+                                        下载
+                                    </Button>
+                                ]}
+                                style={{ marginBottom: 8 }}
+                            />
+                        </Col>
+                    ))}
+                </Row>
+            ) : (
+                <div style={{
+                    textAlign: 'center',
+                    padding: '30px 20px',
+                    color: '#999',
+                    height: '150px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                }}>
+                    <div style={{ fontSize: '48px', marginBottom: '16px', opacity: 0.3 }}>🖼️</div>
+                    <Text type="secondary" style={{ fontSize: '16px' }}>暂无生成的图片</Text>
+                    <Text type="secondary" style={{ fontSize: '12px', marginTop: '8px' }}>点击"生成图片"开始创作</Text>
+                </div>
+            )}
+        </Card>
+    );
+
+
+    // ==================== 主渲染 ====================
+    return (
+        <div style={{ padding: '24px' }}>
+            <Typography.Title level={2}>AI 图像生成器</Typography.Title>
+
+            {/* WebUI 状态 */}
+            <Card size="small" style={{ marginBottom: 16 }}>
+                {renderWebUIStatus()}
+            </Card>
+
+            <Row gutter={[16, 16]}>
+                {/* 左侧区域 */}
+                <Col span={12}>
+                    <Row gutter={[0, 16]}>
+                        {/* 左上：生成参数 */}
+                        <Col span={24}>
+                            {renderParameterControls()}
+                        </Col>
+                        {/* 左下：配置管理 */}
+                        <Col span={24}>
+                            {renderConfigSelector()}
+                        </Col>
+                    </Row>
+                </Col>
+
+                {/* 右侧区域 */}
+                <Col span={12}>
+                    <Row gutter={[0, 16]}>
+                        {/* 右上：生成结果 */}
+                        <Col span={24}>
+                            {renderGeneratedImages()}
+                        </Col>
+                        {/* 右下：控制面板 */}
+                        <Col span={24}>
+                            {renderControlButtons()}
+                        </Col>
+                    </Row>
+                </Col>
+            </Row>
+
+            {/* 任务管理 */}
+            <Card
+                title="📋 AI生成任务管理"
+                style={{ marginTop: 24 }}
+                extra={
+                    <Space>
+                        <Button
+                            icon={<ReloadOutlined />}
+                            onClick={loadTasks}
+                            loading={taskLoading}
+                        >
+                            刷新任务
+                        </Button>
+                        <Button
+                            icon={<DeleteOutlined />}
+                            onClick={handleBatchDelete}
+                            danger
+                        >
+                            批量删除
+                        </Button>
+                        <Button
+                            type={showTaskManagement ? 'primary' : 'default'}
+                            onClick={() => setShowTaskManagement(!showTaskManagement)}
+                        >
+                            {showTaskManagement ? '隐藏任务管理' : '显示任务管理'}
+                        </Button>
+                    </Space>
+                }
+            >
+                {showTaskManagement && (
+                    <Spin spinning={taskLoading}>
+                        <Table
+                            columns={taskColumns}
+                            dataSource={tasks || []}
+                            rowKey="id"
+                            pagination={{
+                                pageSize: 10,
+                                showSizeChanger: true,
+                                showQuickJumper: true,
+                                showTotal: (total, range) =>
+                                    `第 ${range[0]}-${range[1]} 条/共 ${total} 条`
+                            }}
+                            size="small"
+                            scroll={{ y: 400 }}
+                        />
+                    </Spin>
+                )}
+            </Card>
+
+            {/* 任务详情模态框 */}
+            <Modal
+                title="任务详情"
+                open={taskDetailVisible}
+                onCancel={handleCloseTaskDetail}
+                footer={[
+                    <Button key="close" onClick={handleCloseTaskDetail}>
+                        关闭
+                    </Button>
+                ]}
+                width={800}
+                style={{ top: 20 }}
+            >
+                {selectedTask && (
+                    <div>
+                        {/* 任务基本信息 */}
+                        <Card title="基本信息" size="small" style={{ marginBottom: 16 }}>
+                            <Row gutter={[16, 8]}>
+                                <Col span={12}>
+                                    <Text strong>任务ID: </Text>
+                                    <Text copyable>{selectedTask.id}</Text>
+                                </Col>
+                                <Col span={12}>
+                                    <Text strong>状态: </Text>
+                                    <Tag color={
+                                        selectedTask.status === 'completed' ? 'success' :
+                                            selectedTask.status === 'failed' ? 'error' :
+                                                selectedTask.status === 'running' ? 'processing' : 'default'
+                                    }>
+                                        {selectedTask.status === 'completed' ? '已完成' :
+                                            selectedTask.status === 'failed' ? '失败' :
+                                                selectedTask.status === 'running' ? '运行中' :
+                                                    selectedTask.status === 'pending' ? '等待中' : selectedTask.status}
+                                    </Tag>
+                                </Col>
+                                <Col span={12}>
+                                    <Text strong>创建时间: </Text>
+                                    <Text>{new Date(selectedTask.created_at).toLocaleString()}</Text>
+                                </Col>
+                                <Col span={12}>
+                                    <Text strong>完成时间: </Text>
+                                    <Text>{selectedTask.completed_at ? new Date(selectedTask.completed_at).toLocaleString() : '未完成'}</Text>
+                                </Col>
+                                <Col span={24}>
+                                    <Text strong>配置ID: </Text>
+                                    <Text>{selectedTask.config_id || 'N/A'}</Text>
+                                </Col>
+                                {selectedTask.status === 'failed' && (selectedTask.error || selectedTask.error_message) && (
+                                    <Col span={24}>
+                                        <Text strong>失败原因: </Text>
+                                        <Text style={{ color: '#ff4d4f' }}>{selectedTask.error || selectedTask.error_message}</Text>
+                                    </Col>
+                                )}
+                            </Row>
+                        </Card>
+
+                        {/* 进度信息 */}
+                        <Card title="进度信息" size="small" style={{ marginBottom: 16 }}>
+                            <div style={{ marginBottom: 16 }}>
+                                <Text strong>总体进度: </Text>
+                                <Progress
+                                    percent={selectedTask.progress || 0}
+                                    status={
+                                        selectedTask.status === 'failed' ? 'exception' :
+                                            selectedTask.status === 'completed' ? 'success' : 'active'
+                                    }
+                                />
+                            </div>
+                            <Row gutter={[16, 8]}>
+                                <Col span={8}>
+                                    <Text strong>生成图片: </Text>
+                                    <Text style={{ color: '#1890ff' }}>{selectedTask.images_generated || 0}</Text>
+                                </Col>
+                                <Col span={8}>
+                                    <Text strong>成功图片: </Text>
+                                    <Text style={{ color: '#52c41a' }}>{selectedTask.images_success || 0}</Text>
+                                </Col>
+                                <Col span={8}>
+                                    <Text strong>失败图片: </Text>
+                                    <Text style={{ color: '#ff4d4f' }}>{(selectedTask.images_generated || 0) - (selectedTask.images_success || 0)}</Text>
+                                </Col>
+                            </Row>
+                        </Card>
+
+                        {/* 任务日志 */}
+                        <Card
+                            title={
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <span>执行日志</span>
+                                    <Space>
+                                        <Button
+                                            size="small"
+                                            onClick={() => setTaskLogs([])}
+                                            disabled={taskLogs.length === 0}
+                                        >
+                                            清空日志
+                                        </Button>
+                                        {selectedTask?.status === 'running' && (
+                                            <Badge status="processing" text="实时更新中" />
+                                        )}
+                                    </Space>
+                                </div>
+                            }
+                            size="small"
+                        >
+                            <div
+                                ref={logContainerRef}
+                                style={{
+                                    height: '300px',
+                                    overflow: 'auto',
+                                    backgroundColor: '#f5f5f5',
+                                    padding: '12px',
+                                    borderRadius: '4px',
+                                    fontFamily: 'monospace',
+                                    fontSize: '12px',
+                                    lineHeight: '1.5'
+                                }}
+                            >
+                                {taskDetailLoading ? (
+                                    <div style={{ textAlign: 'center', padding: '20px' }}>
+                                        <Spin size="small" />
+                                        <div style={{ marginTop: '8px' }}>加载日志中...</div>
+                                    </div>
+                                ) : (
+                                    taskLogs.map((log, index) => (
+                                        <div key={index} style={{
+                                            marginBottom: '4px',
+                                            color: log.includes('失败') || log.includes('错误') ? '#ff4d4f' :
+                                                log.includes('完成') || log.includes('成功') ? '#52c41a' :
+                                                    log.includes('开始') ? '#1890ff' : '#666'
+                                        }}>
+                                            [{new Date().toLocaleTimeString()}] {log}
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </Card>
+                    </div>
+                )}
+            </Modal>
+
+            {/* 图片查看器Modal */}
+            <Modal
+                title="图片查看器"
+                open={imageViewerVisible}
+                onCancel={handleCloseViewer}
+                footer={null}
+                width="90%"
+                style={{ top: 20 }}
+                bodyStyle={{ padding: 0, height: '80vh' }}
+            >
+                <div style={{
+                    height: '100%',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    position: 'relative'
+                }}>
+                    {/* 主图片显示区域 */}
+                    <div style={{
+                        width: '100%',
+                        height: 'calc(100% - 60px)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        position: 'relative'
+                    }}>
+                        {viewerImages.length > 0 && (
+                            <Image
+                                src={viewerImages[currentImageIndex]}
+                                alt={`Image ${currentImageIndex + 1}`}
+                                style={{
+                                    maxWidth: '100%',
+                                    maxHeight: '100%',
+                                    objectFit: 'contain'
+                                }}
+                                preview={false}
+                            />
+                        )}
+                    </div>
+
+                    {/* 导航控制区域 */}
+                    <div style={{
+                        height: '60px',
+                        width: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        background: '#f5f5f5',
+                        borderTop: '1px solid #d9d9d9'
+                    }}>
+                        <Space size="large">
+                            {/* 上一张按钮 */}
+                            <Button
+                                icon={<ReloadOutlined style={{ transform: 'scaleX(-1)' }} />}
+                                onClick={handlePrevImage}
+                                disabled={viewerImages.length <= 1}
+                                size="large"
+                            >
+                                上一张
+                            </Button>
+
+                            {/* 图片计数器 */}
+                            <div style={{
+                                fontSize: '16px',
+                                fontWeight: 'bold',
+                                color: '#1890ff',
+                                minWidth: '100px',
+                                textAlign: 'center'
+                            }}>
+                                {currentImageIndex + 1} / {viewerImages.length}
+                            </div>
+
+                            {/* 下一张按钮 */}
+                            <Button
+                                icon={<ReloadOutlined />}
+                                onClick={handleNextImage}
+                                disabled={viewerImages.length <= 1}
+                                size="large"
+                            >
+                                下一张
+                            </Button>
+                        </Space>
+                    </div>
+
+                    {/* 键盘导航提示 */}
+                    <div style={{
+                        position: 'absolute',
+                        top: 10,
+                        right: 10,
+                        background: 'rgba(0,0,0,0.6)',
+                        color: 'white',
+                        padding: '4px 8px',
+                        borderRadius: '4px',
+                        fontSize: '12px'
+                    }}>
+                        使用 ← → 键切换图片
+                    </div>
+                </div>
+            </Modal>
+
         </div>
     );
 };

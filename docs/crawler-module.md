@@ -1,11 +1,13 @@
 # 爬虫模块文档
 
-爬虫模块是PixivTailor的数据获取模块，负责从Pixiv网站爬取插画数据，支持多种爬取方式和智能限流机制。
+爬虫模块是PixivTailor的数据获取模块，负责从Pixiv网站爬取插画数据，支持多种爬取方式和智能限流机制。该模块已完全实现并集成到Web界面中。
 
 ## 📁 模块结构
 
 - **backend/internal/crawler/**: 爬虫核心实现目录
 - **crawler.go**: 爬虫核心实现文件
+- **backend/internal/api/**: API接口实现
+- **backend/internal/http/**: HTTP服务器集成
 
 ## 🔧 核心组件
 
@@ -18,10 +20,14 @@
 - **CrawlByUser**: 按用户ID爬取用户作品
 - **CrawlByIllust**: 按插画ID爬取特定作品
 - **DownloadImage**: 下载图像文件到本地
+- **SetLogCallback**: 设置日志回调函数
+- **SetProxy**: 设置代理服务器
+- **SetCookie**: 设置Pixiv Cookie
+- **SetTaskID**: 设置任务ID用于缓存管理
 
 ## 🚀 主要功能
 
-### 1. 标签搜索爬取
+### 1. 标签搜索爬取 ✅
 
 **功能描述**: 根据指定标签搜索并爬取Pixiv插画
 
@@ -37,6 +43,8 @@
 - 自动获取插画详细信息
 - 支持多页结果爬取
 - **多图片支持**: 自动下载同一插画的所有页面图片
+- **智能缓存系统**: 按日期缓存爬取结果，避免重复API请求
+- **Web界面集成**: 通过Web界面进行可视化操作
 
 **支持标签类型**:
 - **角色标签**: 人物数量、性别、年龄等
@@ -44,7 +52,7 @@
 - **动作标签**: 坐姿、站姿、躺姿等动作
 - **服装标签**: 服装类型、配饰等
 
-### 2. 用户作品爬取
+### 2. 用户作品爬取 ✅
 
 **功能描述**: 爬取指定用户的所有作品
 
@@ -59,8 +67,10 @@
 - 获取作品详细信息和标签
 - 支持批量下载
 - **多图片支持**: 自动下载同一插画的所有页面图片
+- **智能缓存系统**: 按用户ID和日期缓存爬取结果
+- **Web界面集成**: 通过Web界面进行可视化操作
 
-### 3. 单图下载
+### 3. 单图下载 ✅
 
 **功能描述**: 下载特定插画ID的图片
 
@@ -73,14 +83,16 @@
 - 自动选择最佳质量
 - 获取作品元数据
 - 支持多图作品下载
+- **Web界面集成**: 通过Web界面进行可视化操作
 
-### 4. 图像下载
+### 4. 图像下载 ✅
 
 **功能描述**: 下载图像文件到本地
 
 **支持参数**:
 - **imageURL**: 图像URL
 - **savePath**: 保存路径
+- **taskID**: 任务ID（用于进度跟踪）
 
 **功能特点**:
 - 支持多种图片格式（JPG、PNG、GIF、WebP）
@@ -94,6 +106,7 @@
 - **文件存在检查**: 自动跳过已存在的文件，避免重复下载
 - **动态大小下载**: 自动处理无Content-Length头的响应，支持分块传输
 - **智能缓存系统**: 按日期缓存爬取结果，避免重复API请求
+- **Web界面集成**: 通过Web界面进行可视化操作和进度监控
 
 ## ⚙️ 配置参数
 
@@ -319,6 +332,58 @@
 - 处理重复文件名冲突
 - 保持文件扩展名正确性
 
+## 🌐 API接口
+
+### HTTP API端点
+
+**爬虫任务管理**:
+- `POST /api/crawl/create` - 创建爬虫任务
+- `POST /api/crawl/results` - 获取爬虫结果
+- `POST /api/generated/images` - 获取生成的图片
+
+**任务管理**:
+- `POST /api/task/start` - 启动任务
+- `POST /api/task/stop` - 停止任务
+- `POST /api/task/cleanup` - 清理任务
+- `POST /api/status` - 获取任务状态
+- `POST /api/cancel` - 取消任务
+- `POST /api/delete` - 删除任务
+- `POST /api/tasks` - 获取任务列表
+
+**图片服务**:
+- `GET /api/tasks/{taskId}/images/{imageIndex}` - 获取任务图片
+- `GET /api/images/{path}` - 图片文件服务
+
+**系统信息**:
+- `POST /api/system/info` - 获取系统信息
+- `POST /api/filetree` - 获取文件树
+
+### WebSocket实时通信
+
+**消息类型**:
+- `task_update` - 任务状态更新
+- `log_message` - 日志消息
+- `global_log` - 全局日志消息
+
+**任务更新数据结构**:
+```json
+{
+  "type": "task_update",
+  "task_id": "task_id",
+  "data": {
+    "task_id": "task_id",
+    "status": "running|completed|failed|cancelled",
+    "progress": 50,
+    "images_found": 10,
+    "images_downloaded": 8,
+    "images_generated": 10,
+    "images_success": 8,
+    "result": {...},
+    "time": "2025-01-01 12:00:00"
+  }
+}
+```
+
 ## 📊 数据模型
 
 ### PixivImage数据结构
@@ -335,6 +400,16 @@
 - **CreatedAt**: 创建时间
 - **Width**: 图片宽度
 - **Height**: 图片高度
+
+### CrawlCache缓存结构
+- **Date**: 缓存日期 (YYYY-MM-DD)
+- **Type**: 爬取类型 (tag/user/illust)
+- **Query**: 查询参数
+- **UserID**: 用户ID (仅用户爬取时使用)
+- **Limit**: 限制数量
+- **Images**: 图片数据列表
+- **CreatedAt**: 创建时间
+- **UpdatedAt**: 更新时间
 
 ## 🚨 错误处理
 

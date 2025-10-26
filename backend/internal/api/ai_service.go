@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"pixiv-tailor/backend/pkg/models"
@@ -66,7 +67,10 @@ func (a *aiServiceImpl) GenerateImages(request *models.GenerateRequest) ([]*mode
 		"seed":            request.Seed,
 		"sampler_name":    request.Sampler,
 		"batch_size":      request.BatchSize,
+		"n_iter":          request.BatchCount,
 		"enable_hr":       request.EnableHR,
+		"save_images":     true,
+		"save_grid":       false,
 	}
 
 	// 序列化请求
@@ -81,11 +85,21 @@ func (a *aiServiceImpl) GenerateImages(request *models.GenerateRequest) ([]*mode
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}
 
+	// 设置超时
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
 	resp, err := a.httpClient.DoWithRetry(req)
 	if err != nil {
 		return nil, fmt.Errorf("请求SD WebUI失败: %v", err)
 	}
 	defer resp.Body.Close()
+
+	// 检查HTTP状态码
+	if resp.StatusCode != http.StatusOK {
+		body, _ := a.httpClient.ReadResponseBody(resp)
+		return nil, fmt.Errorf("SD WebUI返回错误状态: %d, 响应: %s", resp.StatusCode, string(body))
+	}
 
 	// 解析响应
 	var sdResponse struct {
@@ -113,7 +127,7 @@ func (a *aiServiceImpl) GenerateImages(request *models.GenerateRequest) ([]*mode
 			},
 			Prompt:         request.Prompt,
 			NegativePrompt: request.NegativePrompt,
-			Model:          "SD WebUI",
+			Model:          request.Model,
 			ImageURL:       fmt.Sprintf("data:image/png;base64,%s", imageBase64),
 			Width:          request.Width,
 			Height:         request.Height,

@@ -33,7 +33,9 @@ func ensureLogger() {
 		logger.SetFormatter(&logrus.TextFormatter{
 			FullTimestamp:   true,
 			TimestampFormat: "2006-01-02 15:04:05",
+			DisableColors:   false,
 		})
+		logger.SetOutput(os.Stdout)
 	}
 }
 
@@ -54,6 +56,7 @@ func Init(verbose bool) {
 	logger.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp:   true,
 		TimestampFormat: "2006-01-02 15:04:05",
+		DisableColors:   false,
 	})
 
 	// 设置输出

@@ -66,7 +66,7 @@ func main() {
   pixiv-tailor server
   
   # 指定端口和配置
-  pixiv-tailor server --port :8080 --config configs/custom.json
+  pixiv-tailor server --port :8080 --config global_configs/custom.json
   
   # 指定数据库路径
   pixiv-tailor server --db data/custom.db`,

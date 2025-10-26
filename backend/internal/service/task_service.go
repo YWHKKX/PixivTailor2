@@ -2,19 +2,22 @@ package service
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"pixiv-tailor/backend/internal/ai"
 	"pixiv-tailor/backend/internal/crawler"
 	"pixiv-tailor/backend/internal/logger"
 	"pixiv-tailor/backend/internal/repository"
 	"pixiv-tailor/backend/pkg/models"
+	"pixiv-tailor/backend/pkg/paths"
 
 	"github.com/google/uuid"
 )
@@ -29,10 +32,12 @@ type TaskService interface {
 	UpdateTaskCompletedAt(id string, completedAt time.Time) error
 	UpdateTaskImagesFound(id string, count int) error
 	UpdateTaskImagesDownloaded(id string, count int) error
+	UpdateTaskResult(id string, result map[string]interface{}) error
 	ListTasks(page, pageSize int32, status, taskType string) ([]*repository.Task, int, error)
 	StartTask(id string) error
 	StopTask(id string) error
 	CancelTask(id string) error
+	DeleteTask(id string) error
 	CleanupTasks(cleanupType string) (int, error)
 	SetLogCallback(callback func(taskID, level, message string))
 	SetStatusCallback(callback func(taskID, status string, progress int))
@@ -56,6 +61,18 @@ func NewTaskService(storage repository.Storage) TaskService {
 	}
 }
 
+// generateShortTaskID 生成8位hash任务ID
+func generateShortTaskID() string {
+	// 生成UUID
+	uuidStr := uuid.New().String()
+
+	// 计算MD5哈希
+	hash := md5.Sum([]byte(uuidStr))
+
+	// 取前8位作为任务ID
+	return hex.EncodeToString(hash[:])[:8]
+}
+
 // CreateTask 创建任务
 func (s *taskServiceImpl) CreateTask(taskType, config string) (*repository.Task, error) {
 	logger.Infof("CreateTask 开始执行: taskType=%s, config=%s", taskType, config)
@@ -73,7 +90,7 @@ func (s *taskServiceImpl) CreateTask(taskType, config string) (*repository.Task,
 	}
 
 	task := &repository.Task{
-		ID:        uuid.New().String(),
+		ID:        generateShortTaskID(),
 		Type:      taskType,
 		Status:    "pending",
 		Config:    config,
@@ -145,6 +162,34 @@ func (s *taskServiceImpl) UpdateTaskProgress(id string, progress int) error {
 		if err == nil {
 			s.statusCallback(id, task.Status, progress)
 		}
+	}
+
+	return nil
+}
+
+// UpdateTaskProgressWithStage 更新任务进度（带阶段信息）
+func (s *taskServiceImpl) UpdateTaskProgressWithStage(id string, progress int, stage string) error {
+	if progress < 0 || progress > 100 {
+		return fmt.Errorf("进度值必须在0-100之间")
+	}
+
+	err := s.storage.UpdateTaskProgress(id, progress)
+	if err != nil {
+		return err
+	}
+
+	// 发送WebSocket进度更新消息
+	if s.statusCallback != nil {
+		// 获取当前任务以获取状态信息
+		task, err := s.GetTask(id)
+		if err == nil {
+			s.statusCallback(id, task.Status, progress)
+		}
+	}
+
+	// 发送阶段信息日志
+	if s.logCallback != nil {
+		s.logCallback(id, "info", fmt.Sprintf("阶段: %s - 进度: %d%%", stage, progress))
 	}
 
 	return nil
@@ -289,6 +334,41 @@ func (s *taskServiceImpl) CancelTask(id string) error {
 	return nil
 }
 
+// DeleteTask 删除任务
+func (s *taskServiceImpl) DeleteTask(id string) error {
+	// 检查任务是否存在
+	task, err := s.GetTask(id)
+	if err != nil {
+		return fmt.Errorf("获取任务失败: %v", err)
+	}
+
+	// 如果任务正在运行，先停止它
+	if task.Status == "running" {
+		if err := s.StopTask(id); err != nil {
+			log.Printf("停止运行中的任务失败: %v", err)
+			// 即使停止失败，也继续删除
+		}
+	}
+
+	// 从数据库中删除任务
+	if err := s.storage.DeleteTask(id); err != nil {
+		return fmt.Errorf("删除任务失败: %v", err)
+	}
+
+	// 删除任务相关的图片文件
+	pathManager := paths.GetPathManager()
+	if pathManager != nil {
+		taskDir := pathManager.GetTaskImagesDir(id)
+		if err := os.RemoveAll(taskDir); err != nil {
+			log.Printf("删除任务图片目录失败: %v", err)
+			// 图片删除失败不影响任务删除
+		}
+	}
+
+	log.Printf("任务 %s 已删除", id)
+	return nil
+}
+
 // executeTask 执行任务
 func (s *taskServiceImpl) executeTaskWithContext(ctx context.Context, task *repository.Task) {
 	// 检查上下文是否已被取消
@@ -320,7 +400,10 @@ func (s *taskServiceImpl) executeTask(ctx context.Context, task *repository.Task
 	case "crawl":
 		s.executeCrawlTask(ctx, task, config)
 	case "generate":
-		s.executeGenerateTask(ctx, task, config)
+		// AI生成任务已迁移到 ai_handler.go 中的 processGenerationTaskWithConfig
+		// 这里不再处理，避免重复执行
+		s.UpdateTaskError(task.ID, "AI生成任务已迁移到新系统")
+		s.UpdateTaskStatus(task.ID, "failed")
 	default:
 		s.UpdateTaskError(task.ID, fmt.Sprintf("不支持的任务类型: %s", task.Type))
 		s.UpdateTaskStatus(task.ID, "failed")
@@ -341,8 +424,8 @@ func (s *taskServiceImpl) executeCrawlTask(ctx context.Context, task *repository
 	default:
 	}
 
-	// 更新进度到10%
-	s.UpdateTaskProgress(task.ID, 10)
+	// 更新进度到10% - 初始化阶段
+	s.UpdateTaskProgressWithStage(task.ID, 10, "初始化")
 	s.sendLog(task.ID, "info", "任务初始化完成 (10%)")
 
 	// 创建任务特定的爬虫实例（使用任务特定的缓存和下载目录）
@@ -386,8 +469,8 @@ func (s *taskServiceImpl) executeCrawlTask(ctx context.Context, task *repository
 		s.sendLog(task.ID, level, message)
 	})
 
-	// 更新进度到20%
-	s.UpdateTaskProgress(task.ID, 20)
+	// 更新进度到20% - 配置完成
+	s.UpdateTaskProgressWithStage(task.ID, 20, "配置完成")
 
 	// 检查上下文是否已被取消
 	select {
@@ -446,9 +529,9 @@ func (s *taskServiceImpl) executeCrawlTask(ctx context.Context, task *repository
 		crawlErr = fmt.Errorf("不支持的类型: %s", crawlType)
 	}
 
-	// 更新进度到80%
-	s.UpdateTaskProgress(task.ID, 80)
-	s.sendLog(task.ID, "info", "爬取任务执行完成，正在处理结果... (80%)")
+	// 更新进度到30% - 获取图片阶段完成
+	s.UpdateTaskProgressWithStage(task.ID, 30, "获取图片完成")
+	s.sendLog(task.ID, "info", "爬取任务执行完成，正在处理结果... (30%)")
 
 	if crawlErr != nil {
 		s.sendLog(task.ID, "error", fmt.Sprintf("爬取失败: %v", crawlErr))
@@ -487,8 +570,11 @@ func (s *taskServiceImpl) executeCrawlTask(ctx context.Context, task *repository
 	}
 	s.sendLog(task.ID, "info", fmt.Sprintf("已保存 %d 条爬取结果到数据库", len(results)))
 
+	// 更新进度到40% - 数据处理完成
+	s.UpdateTaskProgressWithStage(task.ID, 40, "数据处理完成")
+	s.sendLog(task.ID, "info", "数据处理完成，开始下载图片... (40%)")
+
 	// 开始下载图片 - 使用简化的API
-	s.sendLog(task.ID, "info", "开始下载图片...")
 	downloadedCount := 0
 
 	// 为每个图片创建下载任务
@@ -542,16 +628,20 @@ func (s *taskServiceImpl) executeCrawlTask(ctx context.Context, task *repository
 		downloadedCount++
 		s.sendLog(task.ID, "info", fmt.Sprintf("图片下载成功: %s", filename))
 
-		// 更新下载进度
-		progress := 80 + int(float64(i+1)/float64(len(results))*20) // 80-100%
-		s.UpdateTaskProgress(task.ID, progress)
+		// 立即更新下载的图片数量，实现实时更新
+		s.UpdateTaskImagesDownloaded(task.ID, downloadedCount)
+
+		// 更新下载进度 - 40%到95%，下载阶段占55%的进度
+		progress := 40 + int(float64(i+1)/float64(len(results))*55) // 40-95%
+		s.UpdateTaskProgressWithStage(task.ID, progress, fmt.Sprintf("下载图片 (%d/%d)", i+1, len(results)))
 	}
 
-	// 更新下载的图片数量
-	s.UpdateTaskImagesDownloaded(task.ID, downloadedCount)
+	// 更新进度到95% - 下载完成
+	s.UpdateTaskProgressWithStage(task.ID, 95, "下载完成")
+	s.sendLog(task.ID, "info", "图片下载完成，正在清理资源... (95%)")
 
-	// 更新进度到100%
-	s.UpdateTaskProgress(task.ID, 100)
+	// 更新进度到100% - 任务完成
+	s.UpdateTaskProgressWithStage(task.ID, 100, "任务完成")
 	s.sendLog(task.ID, "info", "任务处理完成 (100%)")
 
 	// 任务完成
@@ -610,122 +700,7 @@ func (s *taskServiceImpl) sendLog(taskID, level, message string) {
 	}
 }
 
-// executeGenerateTask 执行生成任务
-func (s *taskServiceImpl) executeGenerateTask(ctx context.Context, task *repository.Task, config map[string]interface{}) {
-	logger.Infof("开始执行生成任务: %s", task.ID)
-	s.sendLog(task.ID, "info", "开始执行图片生成任务")
-
-	// 检查上下文是否已被取消
-	select {
-	case <-ctx.Done():
-		s.UpdateTaskStatus(task.ID, "cancelled")
-		s.sendLog(task.ID, "info", "任务已被取消")
-		return
-	default:
-	}
-
-	// 更新进度到10%
-	s.UpdateTaskProgress(task.ID, 10)
-	s.sendLog(task.ID, "info", "任务初始化完成 (10%)")
-
-	// 创建AI生成器实例
-	s.sendLog(task.ID, "info", "正在创建AI生成器实例...")
-	generator, err := ai.NewGenerator()
-	if err != nil {
-		s.sendLog(task.ID, "error", fmt.Sprintf("创建AI生成器失败: %v", err))
-		s.UpdateTaskError(task.ID, fmt.Sprintf("创建AI生成器失败: %v", err))
-		s.UpdateTaskStatus(task.ID, "failed")
-		return
-	}
-	s.sendLog(task.ID, "info", "AI生成器实例创建成功")
-
-	// 更新进度到20%
-	s.UpdateTaskProgress(task.ID, 20)
-
-	// 构造生成请求
-	s.sendLog(task.ID, "info", "正在构造生成请求...")
-	request := &models.GenerateRequest{
-		Prompt:         config["prompt"].(string),
-		NegativePrompt: config["negative_prompt"].(string),
-		Steps:          int(config["steps"].(float64)),
-		CFGScale:       config["cfg_scale"].(float64),
-		Width:          int(config["width"].(float64)),
-		Height:         int(config["height"].(float64)),
-		Seed:           int(config["seed"].(float64)),
-		Model:          config["model"].(string),
-		Sampler:        config["sampler"].(string),
-		BatchSize:      int(config["batch_size"].(float64)),
-		EnableHR:       config["enable_hr"].(bool),
-		Loras:          []models.LoraConfig{}, // TODO: 从配置中解析LoRA配置
-	}
-
-	s.sendLog(task.ID, "info", fmt.Sprintf("开始生成图片: %s", request.Prompt))
-
-	// 更新进度到30%
-	s.UpdateTaskProgress(task.ID, 30)
-
-	// 调用AI生成
-	s.sendLog(task.ID, "info", "正在调用AI生成服务...")
-	images, err := generator.GenerateImages(request)
-	if err != nil {
-		s.sendLog(task.ID, "error", fmt.Sprintf("AI生成失败: %v", err))
-		s.UpdateTaskError(task.ID, fmt.Sprintf("AI生成失败: %v", err))
-		s.UpdateTaskStatus(task.ID, "failed")
-		return
-	}
-
-	s.sendLog(task.ID, "info", fmt.Sprintf("AI生成成功，生成了 %d 张图片", len(images)))
-
-	// 更新进度到80%
-	s.UpdateTaskProgress(task.ID, 80)
-
-	// 保存生成结果
-	s.sendLog(task.ID, "info", "正在保存生成结果...")
-	resultPaths := make([]string, len(images))
-	for i, image := range images {
-		// 生成保存路径
-		outputDir := filepath.Join("backend", "data", "generated")
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			s.sendLog(task.ID, "error", fmt.Sprintf("创建输出目录失败: %v", err))
-			continue
-		}
-
-		filename := fmt.Sprintf("generated_%s_%d.jpg", task.ID, i+1)
-		filepath := filepath.Join(outputDir, filename)
-
-		// 保存图片到文件系统
-		if err := generator.SaveImage(image, filepath); err != nil {
-			s.sendLog(task.ID, "error", fmt.Sprintf("保存图片失败: %v", err))
-			continue
-		}
-
-		// 保存图片信息到数据库
-		repoImage := &repository.GeneratedImage{
-			ID:        fmt.Sprintf("%d", image.ID),
-			Prompt:    image.Prompt,
-			ImageURL:  filepath, // 存储文件路径而不是base64数据
-			Model:     image.Model,
-			CreatedAt: image.CreatedAt,
-		}
-
-		if err := s.storage.AddGeneratedImage(repoImage); err != nil {
-			s.sendLog(task.ID, "error", fmt.Sprintf("保存图片信息到数据库失败: %v", err))
-		}
-
-		resultPaths[i] = filepath
-		s.sendLog(task.ID, "info", fmt.Sprintf("图片已保存: %s", filepath))
-	}
-
-	// 更新进度到100%
-	s.UpdateTaskProgress(task.ID, 100)
-
-	// 更新任务状态为完成
-	s.UpdateTaskStatus(task.ID, "completed")
-	s.UpdateTaskCompletedAt(task.ID, time.Now())
-
-	s.sendLog(task.ID, "info", fmt.Sprintf("生成任务执行完成，共生成 %d 张图片", len(images)))
-	logger.Infof("生成任务执行完成: %s", task.ID)
-}
+// executeGenerateTask 已删除 - AI生成任务已迁移到 ai_handler.go
 
 // UpdateTaskCompletedAt 更新任务完成时间
 func (s *taskServiceImpl) UpdateTaskCompletedAt(id string, completedAt time.Time) error {
@@ -756,6 +731,32 @@ func (s *taskServiceImpl) UpdateTaskImagesFound(id string, count int) error {
 // UpdateTaskImagesDownloaded 更新下载的图片数量
 func (s *taskServiceImpl) UpdateTaskImagesDownloaded(id string, count int) error {
 	err := s.storage.UpdateTaskImagesDownloaded(id, count)
+	if err != nil {
+		return err
+	}
+
+	// 发送WebSocket更新消息
+	if s.statusCallback != nil {
+		// 获取当前任务以获取状态和进度信息
+		task, err := s.GetTask(id)
+		if err == nil {
+			s.statusCallback(id, task.Status, task.Progress)
+		}
+	}
+
+	return nil
+}
+
+// UpdateTaskResult 更新任务结果
+func (s *taskServiceImpl) UpdateTaskResult(id string, result map[string]interface{}) error {
+	// 将结果转换为JSON字符串
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("序列化任务结果失败: %v", err)
+	}
+
+	// 更新数据库
+	err = s.storage.UpdateTaskResult(id, string(resultJSON))
 	if err != nil {
 		return err
 	}

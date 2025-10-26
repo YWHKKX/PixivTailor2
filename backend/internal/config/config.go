@@ -27,6 +27,27 @@ type ModuleConfig interface {
 	GetVersion() string
 }
 
+// EmptyModuleConfig 空模块配置，用于未知模块
+type EmptyModuleConfig struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// Validate 验证配置
+func (e *EmptyModuleConfig) Validate() error {
+	return nil
+}
+
+// GetName 获取模块名称
+func (e *EmptyModuleConfig) GetName() string {
+	return e.Name
+}
+
+// GetVersion 获取模块版本
+func (e *EmptyModuleConfig) GetVersion() string {
+	return e.Version
+}
+
 // ConfigManager 配置管理器
 type ConfigManager struct {
 	configPath string
@@ -75,13 +96,72 @@ func (cm *ConfigManager) Load() error {
 	}
 
 	// 解析配置
-	var config GlobalConfig
-	if err := json.Unmarshal(data, &config); err != nil {
+	var rawConfig map[string]interface{}
+	if err := json.Unmarshal(data, &rawConfig); err != nil {
 		return errors.NewError(errors.ErrCodeConfigParse, fmt.Sprintf("解析配置文件失败: %v", err))
 	}
 
-	cm.config = &config
+	// 创建配置对象
+	config := &GlobalConfig{
+		Version:   "1.0.0",
+		Modules:   make(map[string]ModuleConfig),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	// 解析版本
+	if v, ok := rawConfig["version"].(string); ok {
+		config.Version = v
+	}
+
+	// 解析模块配置
+	if modules, ok := rawConfig["modules"].(map[string]interface{}); ok {
+		for moduleName, moduleData := range modules {
+			moduleConfig, err := cm.parseModuleConfig(moduleName, moduleData)
+			if err != nil {
+				return errors.NewError(errors.ErrCodeConfigParse, fmt.Sprintf("解析模块 %s 配置失败: %v", moduleName, err))
+			}
+			config.Modules[moduleName] = moduleConfig
+		}
+	}
+
+	cm.config = config
 	return nil
+}
+
+// parseModuleConfig 解析模块配置
+func (cm *ConfigManager) parseModuleConfig(moduleName string, moduleData interface{}) (ModuleConfig, error) {
+	// 将模块数据转换为JSON字节
+	moduleBytes, err := json.Marshal(moduleData)
+	if err != nil {
+		return nil, fmt.Errorf("序列化模块数据失败: %v", err)
+	}
+
+	// 根据模块名称创建对应的配置对象
+	switch moduleName {
+	case "ai":
+		var aiConfig AIConfig
+		if err := json.Unmarshal(moduleBytes, &aiConfig); err != nil {
+			return nil, fmt.Errorf("解析AI配置失败: %v", err)
+		}
+		return &aiConfig, nil
+	case "crawler":
+		var crawlerConfig CrawlerConfig
+		if err := json.Unmarshal(moduleBytes, &crawlerConfig); err != nil {
+			return nil, fmt.Errorf("解析爬虫配置失败: %v", err)
+		}
+		return &crawlerConfig, nil
+	case "logger":
+		var loggerConfig LoggerConfig
+		if err := json.Unmarshal(moduleBytes, &loggerConfig); err != nil {
+			return nil, fmt.Errorf("解析日志配置失败: %v", err)
+		}
+		return &loggerConfig, nil
+	default:
+		// 对于未知模块，返回一个空的配置对象
+		logger.Warnf("未知的模块类型: %s，跳过", moduleName)
+		return &EmptyModuleConfig{Name: moduleName, Version: "1.0.0"}, nil
+	}
 }
 
 // Save 保存配置
@@ -170,9 +250,9 @@ func (cm *ConfigManager) createDefaultConfigUnlocked() error {
 	cm.config.Modules["logger"] = &LoggerConfig{
 		Name:    "logger",
 		Version: "1.0.0",
-		Level:   "info",
-		Format:  "text",
-		Output:  "stdout",
+		Level:   map[string]interface{}{"default": "info"},
+		Format:  map[string]interface{}{"type": "text"},
+		Output:  map[string]interface{}{"type": "stdout"},
 	}
 
 	return cm.saveUnlocked()

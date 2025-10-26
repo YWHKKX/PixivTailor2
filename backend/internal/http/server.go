@@ -1,13 +1,19 @@
 package http
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"time"
 
 	"pixiv-tailor/backend/internal/repository"
@@ -20,14 +26,21 @@ import (
 
 // HTTP 服务器 - 基于 plan.md 设计
 type HTTPServer struct {
-	TaskService   service.TaskService
-	ConfigService service.ConfigService
-	DataService   service.DataService
-	SystemService service.SystemService
-	router        *mux.Router
-	upgrader      websocket.Upgrader
-	clients       map[*websocket.Conn]bool
-	broadcast     chan []byte
+	TaskService             service.TaskService
+	ConfigService           service.ConfigService
+	DataService             service.DataService
+	SystemService           service.SystemService
+	GenerationConfigService service.GenerationConfigService
+	router                  *mux.Router
+	upgrader                websocket.Upgrader
+	clients                 map[*websocket.Conn]bool
+	clientsMutex            sync.RWMutex
+	broadcast               chan []byte
+	// WebUI相关字段
+	webUIProcess     *os.Process
+	webUILogChannels []chan string
+	webUIStatus      string
+	webUILogMutex    sync.RWMutex
 }
 
 // 响应结构
@@ -70,13 +83,14 @@ type GenerationResponse struct {
 
 // 任务状态响应
 type TaskStatusResponse struct {
-	TaskID      string     `json:"task_id"`
-	Status      string     `json:"status"`
-	Progress    int        `json:"progress"`
-	Message     string     `json:"message"`
-	Result      []string   `json:"result,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	TaskID       string     `json:"task_id"`
+	Status       string     `json:"status"`
+	Progress     int        `json:"progress"`
+	Message      string     `json:"message"`
+	ErrorMessage string     `json:"error_message,omitempty"`
+	Result       []string   `json:"result,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 }
 
 // WebSocket 消息结构
@@ -93,13 +107,15 @@ func NewHTTPServer(
 	configService service.ConfigService,
 	dataService service.DataService,
 	systemService service.SystemService,
+	generationConfigService service.GenerationConfigService,
 ) *HTTPServer {
 	server := &HTTPServer{
-		TaskService:   taskService,
-		ConfigService: configService,
-		DataService:   dataService,
-		SystemService: systemService,
-		router:        mux.NewRouter(),
+		TaskService:             taskService,
+		ConfigService:           configService,
+		DataService:             dataService,
+		SystemService:           systemService,
+		GenerationConfigService: generationConfigService,
+		router:                  mux.NewRouter(),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // 允许所有来源
@@ -142,11 +158,45 @@ func (s *HTTPServer) setupRoutes() {
 
 	// 生成图像
 	api.HandleFunc("/generate", s.handleGenerate).Methods("POST", "OPTIONS")
+	api.HandleFunc("/generate-with-config", s.handleGenerateWithConfig).Methods("POST", "OPTIONS")
+
+	// WebUI管理
+	api.HandleFunc("/webui/start", s.handleStartWebUI).Methods("POST", "OPTIONS")
+	api.HandleFunc("/webui/start-external", s.handleStartWebUIExternal).Methods("POST", "OPTIONS")
+	api.HandleFunc("/webui/stop", s.handleStopWebUI).Methods("POST", "OPTIONS")
+	api.HandleFunc("/webui/status", s.handleWebUIStatus).Methods("GET", "OPTIONS")
+	api.HandleFunc("/webui/logs", s.handleWebUILogs).Methods("GET", "OPTIONS")
+
+	// 配置文件管理
+	api.HandleFunc("/configs", s.handleListConfigs).Methods("GET", "OPTIONS")
+	api.HandleFunc("/configs/create", s.handleCreateConfig).Methods("POST", "OPTIONS")
+	api.HandleFunc("/configs/categories", s.handleGetCategories).Methods("GET", "POST", "OPTIONS")
+	api.HandleFunc("/configs/default", s.handleGetDefaultConfig).Methods("GET", "OPTIONS")
+	api.HandleFunc("/configs/default", s.handleSetDefaultConfig).Methods("POST", "OPTIONS")
+	api.HandleFunc("/configs/import", s.handleImportConfig).Methods("POST", "OPTIONS")
+	api.HandleFunc("/configs/export", s.handleExportConfigs).Methods("POST", "OPTIONS")
+	api.HandleFunc("/configs/import-file", s.handleImportFromFile).Methods("POST", "OPTIONS")
+	api.HandleFunc("/configs/export-file", s.handleExportToFile).Methods("POST", "OPTIONS")
+	api.HandleFunc("/configs/load-from-files", s.handleLoadConfigsFromFiles).Methods("POST", "OPTIONS")
+	api.HandleFunc("/configs/name/{name}", s.handleGetConfigByName).Methods("GET", "OPTIONS")
+	api.HandleFunc("/configs/{id}/use", s.handleUseConfig).Methods("POST", "OPTIONS")
+	api.HandleFunc("/configs/{id}", s.handleGetConfig).Methods("GET", "OPTIONS")
+	api.HandleFunc("/configs/{id}", s.handleUpdateConfig).Methods("PUT", "OPTIONS")
+	api.HandleFunc("/configs/{id}", s.handleDeleteConfig).Methods("DELETE", "OPTIONS")
+
+	// 文件系统配置管理API
+	api.HandleFunc("/configs/file/create", s.handleCreateConfigFile).Methods("POST", "OPTIONS")
+	api.HandleFunc("/configs/file/{id}/update", s.handleUpdateConfigFile).Methods("PUT", "OPTIONS")
+	api.HandleFunc("/configs/file/{id}/delete", s.handleDeleteConfigFile).Methods("DELETE", "OPTIONS")
 
 	// 任务管理
 	api.HandleFunc("/status", s.handleGetTaskStatus).Methods("POST", "OPTIONS")
 	api.HandleFunc("/cancel", s.handleCancelTask).Methods("POST", "OPTIONS")
+	api.HandleFunc("/delete", s.handleDeleteTask).Methods("POST", "OPTIONS")
 	api.HandleFunc("/tasks", s.handleGetTasks).Methods("POST", "OPTIONS")
+
+	// 任务图片服务
+	api.HandleFunc("/tasks/{taskId}/images/{imageIndex}", s.handleGetTaskImage).Methods("GET")
 
 	// 配置管理
 	api.HandleFunc("/config/get", s.handleGetConfig).Methods("POST", "OPTIONS")
@@ -211,57 +261,9 @@ func (s *HTTPServer) handleAllOptions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// 生成图像处理器
+// 生成图像处理器 - 已删除，使用 handleGenerateWithConfig 替代
 func (s *HTTPServer) handleGenerate(w http.ResponseWriter, r *http.Request) {
-	var req GenerationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.sendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err.Error())
-		return
-	}
-
-	// 验证请求参数
-	if req.Prompt == "" {
-		s.sendErrorResponse(w, http.StatusBadRequest, "Prompt is required", "")
-		return
-	}
-
-	// 创建任务配置
-	config := map[string]interface{}{
-		"prompt":          req.Prompt,
-		"negative_prompt": req.NegativePrompt,
-		"steps":           req.Steps,
-		"cfg_scale":       req.CFGScale,
-		"width":           req.Width,
-		"height":          req.Height,
-		"seed":            req.Seed,
-		"model":           req.Model,
-		"sampler":         req.Sampler,
-		"batch_size":      req.BatchSize,
-		"enable_hr":       req.EnableHR,
-	}
-
-	configJSON, _ := json.Marshal(config)
-
-	// 创建任务
-	task, err := s.TaskService.CreateTask("generate", string(configJSON))
-	if err != nil {
-		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to create task", err.Error())
-		return
-	}
-
-	// 构造响应
-	response := GenerationResponse{
-		TaskID:    task.ID,
-		Status:    task.Status,
-		Progress:  task.Progress,
-		Message:   "任务已创建，正在处理中...",
-		CreatedAt: task.CreatedAt,
-	}
-
-	s.sendSuccessResponse(w, response)
-
-	// 启动后台处理
-	go s.processGenerationTask(task.ID)
+	s.sendErrorResponse(w, http.StatusNotImplemented, "此端点已废弃", "请使用 /api/generate-with-config 端点")
 }
 
 // 获取任务状态处理器
@@ -282,12 +284,18 @@ func (s *HTTPServer) handleGetTaskStatus(w http.ResponseWriter, r *http.Request)
 	}
 
 	response := TaskStatusResponse{
-		TaskID:      task.ID,
-		Status:      task.Status,
-		Progress:    task.Progress,
-		Message:     task.Config,
-		CreatedAt:   task.CreatedAt,
-		CompletedAt: &task.UpdatedAt,
+		TaskID:       task.ID,
+		Status:       task.Status,
+		Progress:     task.Progress,
+		Message:      task.Config,
+		ErrorMessage: task.ErrorMessage,
+		CreatedAt:    task.CreatedAt,
+		CompletedAt:  nil, // 默认不设置完成时间
+	}
+
+	// 只有当任务完成、失败或取消时才设置完成时间
+	if task.Status == "completed" || task.Status == "failed" || task.Status == "cancelled" {
+		response.CompletedAt = &task.UpdatedAt
 	}
 
 	s.sendSuccessResponse(w, response)
@@ -304,13 +312,103 @@ func (s *HTTPServer) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.TaskService.CancelTask(req.TaskID)
+	// 获取任务信息
+	task, err := s.TaskService.GetTask(req.TaskID)
+	if err != nil {
+		s.sendErrorResponse(w, http.StatusNotFound, "Task not found", err.Error())
+		return
+	}
+
+	// 如果是AI生成任务且正在运行，先停止WebUI的工作
+	if task.Type == "generate" && (task.Status == "running" || task.Status == "pending") {
+		log.Printf("取消AI生成任务 %s，停止WebUI工作", req.TaskID)
+		if err := s.stopWebUIGeneration(); err != nil {
+			log.Printf("停止WebUI工作失败: %v", err)
+		}
+	}
+
+	err = s.TaskService.CancelTask(req.TaskID)
 	if err != nil {
 		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to cancel task", err.Error())
 		return
 	}
 
 	s.sendSuccessResponse(w, map[string]string{"message": "Task cancelled successfully"})
+}
+
+// 删除任务处理器
+func (s *HTTPServer) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TaskID string `json:"task_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+
+	err := s.TaskService.DeleteTask(req.TaskID)
+	if err != nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to delete task", err.Error())
+		return
+	}
+
+	s.sendSuccessResponse(w, map[string]string{"message": "Task deleted successfully"})
+}
+
+// 获取任务图片处理器
+func (s *HTTPServer) handleGetTaskImage(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	taskID := vars["taskId"]
+	imageIndex := vars["imageIndex"]
+
+	// 获取路径管理器
+	pathManager := paths.GetPathManager()
+	if pathManager == nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "Path manager not initialized", "")
+		return
+	}
+
+	// 构建图片文件路径
+	taskDir := pathManager.GetTaskImagesDir(taskID)
+
+	// 尝试不同的文件扩展名
+	extensions := []string{"png", "jpg", "jpeg", "webp"}
+	var imagePath string
+	var found bool
+
+	for _, ext := range extensions {
+		imagePath = filepath.Join(taskDir, fmt.Sprintf("generated_%s_%s.%s", taskID, imageIndex, ext))
+		if _, err := os.Stat(imagePath); err == nil {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		s.sendErrorResponse(w, http.StatusNotFound, "Image not found", "")
+		return
+	}
+
+	// 根据文件扩展名设置Content-Type
+	ext := filepath.Ext(imagePath)
+	var contentType string
+	switch ext {
+	case ".jpg", ".jpeg":
+		contentType = "image/jpeg"
+	case ".png":
+		contentType = "image/png"
+	case ".webp":
+		contentType = "image/webp"
+	default:
+		contentType = "image/png"
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+
+	// 读取并返回图片文件
+	http.ServeFile(w, r, imagePath)
 }
 
 // 获取任务列表处理器
@@ -351,48 +449,6 @@ func (s *HTTPServer) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.sendSuccessResponse(w, response)
-}
-
-// 获取配置处理器
-func (s *HTTPServer) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Module string `json:"module"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.sendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err.Error())
-		return
-	}
-
-	config, err := s.ConfigService.GetConfig(req.Module)
-	if err != nil {
-		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to get config", err.Error())
-		return
-	}
-
-	s.sendSuccessResponse(w, config)
-}
-
-// 更新配置处理器
-func (s *HTTPServer) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Module string      `json:"module"`
-		Config interface{} `json:"config"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.sendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err.Error())
-		return
-	}
-
-	configJSON, _ := json.Marshal(req.Config)
-	err := s.ConfigService.SetConfig(req.Module, string(configJSON))
-	if err != nil {
-		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to update config", err.Error())
-		return
-	}
-
-	s.sendSuccessResponse(w, map[string]string{"message": "Config updated successfully"})
 }
 
 // 获取爬取结果处理器
@@ -702,32 +758,53 @@ func (s *HTTPServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("WebSocket upgrade failed: %v", err)
 		return
 	}
-	defer conn.Close()
+	defer func() {
+		// 确保连接被正确关闭
+		if err := conn.Close(); err != nil {
+			log.Printf("WebSocket close error: %v", err)
+		}
+	}()
 
 	// 注册客户端
+	s.clientsMutex.Lock()
 	s.clients[conn] = true
-	log.Printf("WebSocket client connected. Total clients: %d", len(s.clients))
+	s.clientsMutex.Unlock()
 
 	// 发送欢迎消息
 	welcomeMsg := WSMessage{
 		Type:    "welcome",
 		Message: "Connected to PixivTailor WebSocket server",
 	}
-	conn.WriteJSON(welcomeMsg)
-	log.Printf("WebSocket welcome message sent to client\n")
+	if err := conn.WriteJSON(welcomeMsg); err != nil {
+		log.Printf("WebSocket welcome message send failed: %v", err)
+		return
+	}
+
+	// 设置读取超时
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 	// 处理消息
 	for {
 		var msg WSMessage
 		err := conn.ReadJSON(&msg)
 		if err != nil {
-			log.Printf("WebSocket read error: %v", err)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("WebSocket unexpected close error: %v", err)
+			} else {
+				log.Printf("WebSocket read error: %v", err)
+			}
 			break
 		}
 
+		// 更新读取超时
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+
 		// 处理心跳
 		if msg.Type == "ping" {
-			conn.WriteJSON(WSMessage{Type: "pong"})
+			if err := conn.WriteJSON(WSMessage{Type: "pong"}); err != nil {
+				log.Printf("WebSocket pong send failed: %v", err)
+				break
+			}
 			continue
 		}
 
@@ -736,8 +813,9 @@ func (s *HTTPServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 注销客户端
+	s.clientsMutex.Lock()
 	delete(s.clients, conn)
-	log.Printf("WebSocket client disconnected. Total clients: %d", len(s.clients))
+	s.clientsMutex.Unlock()
 }
 
 // 处理 WebSocket 消息
@@ -759,12 +837,22 @@ func (s *HTTPServer) setupWebSocket() {
 	go func() {
 		for message := range s.broadcast {
 			// 广播消息给所有客户端
+			s.clientsMutex.RLock()
+			clients := make([]*websocket.Conn, 0, len(s.clients))
 			for client := range s.clients {
+				clients = append(clients, client)
+			}
+			s.clientsMutex.RUnlock()
+
+			// 向所有客户端发送消息
+			for _, client := range clients {
 				err := client.WriteMessage(websocket.TextMessage, message)
 				if err != nil {
 					log.Printf("WebSocket write error: %v", err)
 					client.Close()
+					s.clientsMutex.Lock()
 					delete(s.clients, client)
+					s.clientsMutex.Unlock()
 				}
 			}
 		}
@@ -785,8 +873,6 @@ func (s *HTTPServer) broadcastLogMessage(taskID, level, message string) {
 	}
 
 	msgBytes, _ := json.Marshal(msg)
-	log.Printf("广播日志消息: %s", string(msgBytes))
-	log.Printf("当前WebSocket客户端数量: %d", len(s.clients))
 	s.broadcast <- msgBytes
 }
 
@@ -806,6 +892,17 @@ func (s *HTTPServer) broadcastTaskUpdate(taskID, status string, progress int) {
 		}
 	}
 
+	// 解析任务结果（包含图片URL）
+	var result map[string]interface{}
+	if task.Result != "" {
+		if err := json.Unmarshal([]byte(task.Result), &result); err != nil {
+			log.Printf("解析任务结果失败: %v", err)
+			result = make(map[string]interface{})
+		}
+	} else {
+		result = make(map[string]interface{})
+	}
+
 	msg := WSMessage{
 		Type:   "task_update",
 		TaskID: taskID,
@@ -815,12 +912,13 @@ func (s *HTTPServer) broadcastTaskUpdate(taskID, status string, progress int) {
 			"progress":          progress,
 			"images_found":      task.ImagesFound,
 			"images_downloaded": task.ImagesDownloaded,
+			"images_generated":  task.ImagesFound,      // 前端期望的字段名
+			"images_success":    task.ImagesDownloaded, // 前端期望的字段名
+			"result":            result,                // 包含图片URL
 			"time":              time.Now().Format("2006-01-02 15:04:05"),
 		},
 	}
 	msgBytes, _ := json.Marshal(msg)
-	log.Printf("广播任务更新: %s", string(msgBytes))
-	log.Printf("当前WebSocket客户端数量: %d", len(s.clients))
 	s.broadcast <- msgBytes
 }
 
@@ -836,25 +934,6 @@ func (s *HTTPServer) broadcastGlobalLog(level, message string) {
 	}
 	msgBytes, _ := json.Marshal(msg)
 	s.broadcast <- msgBytes
-}
-
-// 处理生成任务
-func (s *HTTPServer) processGenerationTask(taskID string) {
-	// 设置任务服务的日志回调，将日志转发到WebSocket客户端
-	s.TaskService.SetLogCallback(func(taskID, level, message string) {
-		s.broadcastLogMessage(taskID, level, message)
-	})
-
-	// 启动任务
-	err := s.TaskService.StartTask(taskID)
-	if err != nil {
-		log.Printf("Failed to start generation task: %v", err)
-		s.broadcastLogMessage(taskID, "error", fmt.Sprintf("启动生成任务失败: %v", err))
-		return
-	}
-
-	log.Printf("Generation task started: %s", taskID)
-	s.broadcastLogMessage(taskID, "info", "生成任务已启动")
 }
 
 // 发送成功响应
@@ -1048,8 +1127,28 @@ func (s *HTTPServer) handleStopTask(w http.ResponseWriter, r *http.Request) {
 
 	taskID := req.TaskID
 
-	log.Printf("HTTP: 手动停止任务: %s", taskID)
-	err := s.TaskService.StopTask(taskID)
+	// 获取任务信息
+	task, err := s.TaskService.GetTask(taskID)
+	if err != nil {
+		s.sendErrorResponse(w, http.StatusNotFound, "Task not found", err.Error())
+		return
+	}
+
+	log.Printf("HTTP: 手动停止任务: %s (类型: %s)", taskID, task.Type)
+
+	// 如果是AI生成任务，先停止WebUI的当前生成
+	if task.Type == "generate" {
+		aiHandler := NewAIHandler(nil, s.TaskService, s.GenerationConfigService)
+		if err := aiHandler.stopWebUIGeneration(); err != nil {
+			log.Printf("HTTP: 停止WebUI生成失败: %v", err)
+			// 即使WebUI停止失败，也继续停止任务
+		} else {
+			log.Printf("HTTP: WebUI生成已停止")
+		}
+	}
+
+	// 停止任务
+	err = s.TaskService.StopTask(taskID)
 	if err != nil {
 		log.Printf("HTTP: 停止任务失败: %v", err)
 		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to stop task", err.Error())
@@ -1069,12 +1168,29 @@ func (s *HTTPServer) handleCleanupTasks(w http.ResponseWriter, r *http.Request) 
 		CleanupType string `json:"cleanup_type"` // "completed", "failed", "all"
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 添加调试日志
+	log.Printf("收到清理任务请求，Content-Type: %s", r.Header.Get("Content-Type"))
+
+	// 读取原始请求体
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("读取请求体失败: %v", err)
+		s.sendErrorResponse(w, http.StatusBadRequest, "Failed to read request body", err.Error())
+		return
+	}
+	log.Printf("原始请求体: %s", string(bodyBytes))
+
+	// 解析JSON
+	if err = json.Unmarshal(bodyBytes, &req); err != nil {
+		log.Printf("解析请求体失败: %v", err)
 		s.sendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
 
+	log.Printf("解析后的清理类型: '%s'", req.CleanupType)
+
 	if req.CleanupType == "" {
+		log.Printf("清理类型为空")
 		s.sendErrorResponse(w, http.StatusBadRequest, "Cleanup type is required", "")
 		return
 	}
@@ -1083,7 +1199,6 @@ func (s *HTTPServer) handleCleanupTasks(w http.ResponseWriter, r *http.Request) 
 
 	// 根据清理类型执行清理
 	var cleanedCount int
-	var err error
 
 	switch req.CleanupType {
 	case "completed":
@@ -1111,16 +1226,634 @@ func (s *HTTPServer) handleCleanupTasks(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleLoadConfigsFromFiles 从文件系统加载配置文件
+func (s *HTTPServer) handleLoadConfigsFromFiles(w http.ResponseWriter, r *http.Request) {
+	// 使用 PathManager 获取配置目录
+	pathManager := paths.GetPathManager()
+	if pathManager == nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "Path manager not initialized", "")
+		return
+	}
+
+	configsDir := filepath.Join(pathManager.GetDataDir(), "configs")
+
+	// 读取配置目录中的所有JSON文件
+	files, err := filepath.Glob(filepath.Join(configsDir, "*.json"))
+	if err != nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to read config directory", err.Error())
+		return
+	}
+
+	var loadedConfigs []map[string]interface{}
+	var errors []string
+
+	for _, file := range files {
+		// 读取文件内容
+		content, err := ioutil.ReadFile(file)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Failed to read %s: %v", file, err))
+			continue
+		}
+
+		// 解析JSON
+		var config map[string]interface{}
+		if err := json.Unmarshal(content, &config); err != nil {
+			errors = append(errors, fmt.Sprintf("Failed to parse %s: %v", file, err))
+			continue
+		}
+
+		// 直接返回文件配置，不存储到数据库
+		loadedConfigs = append(loadedConfigs, map[string]interface{}{
+			"id":   getStringFromMap(config, "id"),
+			"name": getStringFromMap(config, "name"),
+			"file": filepath.Base(file),
+		})
+	}
+
+	response := map[string]interface{}{
+		"loaded_configs": loadedConfigs,
+		"total_loaded":   len(loadedConfigs),
+		"errors":         errors,
+	}
+
+	s.sendSuccessResponse(w, response)
+}
+
+// handleStartWebUI 启动WebUI
+func (s *HTTPServer) handleStartWebUI(w http.ResponseWriter, r *http.Request) {
+	// 检查WebUI是否已经在运行
+	if s.isWebUIRunning() {
+		s.sendErrorResponse(w, http.StatusConflict, "WebUI is already running", "")
+		return
+	}
+
+	// 启动WebUI进程
+	go s.startWebUIProcess()
+
+	s.sendSuccessResponse(w, map[string]interface{}{
+		"message": "WebUI启动命令已执行",
+		"status":  "starting",
+	})
+}
+
+// handleStartWebUIExternal 启动外部WebUI（运行批处理脚本）
+func (s *HTTPServer) handleStartWebUIExternal(w http.ResponseWriter, r *http.Request) {
+	// 检查WebUI是否已经在运行
+	status := s.getWebUIStatus()
+	if status["status"] == "running" || status["status"] == "external" {
+		s.sendErrorResponse(w, http.StatusConflict, "WebUI is already running", "")
+		return
+	}
+
+	// 运行批处理脚本
+	cmd := exec.Command("cmd", "/c", "start", "cmd", "/k", "start-webui-api.bat")
+	cmd.Dir = ".." // 在项目根目录运行（从backend目录向上一级）
+
+	if err := cmd.Start(); err != nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to start WebUI", err.Error())
+		return
+	}
+
+	s.sendSuccessResponse(w, map[string]interface{}{
+		"message": "WebUI批处理脚本已启动，请查看弹出的命令行窗口",
+		"status":  "starting",
+	})
+}
+
+// handleStopWebUI 停止WebUI
+func (s *HTTPServer) handleStopWebUI(w http.ResponseWriter, r *http.Request) {
+	if !s.isWebUIRunning() {
+		// WebUI没有运行，返回成功状态而不是错误
+		s.sendSuccessResponse(w, map[string]interface{}{
+			"message": "WebUI未运行",
+			"status":  "stopped",
+		})
+		return
+	}
+
+	// 先调用WebUI的interrupt API停止所有正在进行的生成任务
+	s.broadcastWebUILog("正在停止WebUI的生成任务...")
+	if err := s.stopWebUIGeneration(); err != nil {
+		s.broadcastWebUILog(fmt.Sprintf("停止WebUI生成任务失败: %v", err))
+		// 即使停止生成失败，也继续停止WebUI进程
+	} else {
+		s.broadcastWebUILog("WebUI生成任务已停止")
+	}
+
+	// 等待一段时间让WebUI完成当前操作
+	time.Sleep(2 * time.Second)
+
+	// 停止WebUI进程
+	s.stopWebUIProcess()
+
+	s.sendSuccessResponse(w, map[string]interface{}{
+		"message": "WebUI停止命令已执行",
+		"status":  "stopped",
+	})
+}
+
+// handleWebUIStatus 获取WebUI状态
+func (s *HTTPServer) handleWebUIStatus(w http.ResponseWriter, r *http.Request) {
+	status := s.getWebUIStatus()
+	s.sendSuccessResponse(w, status)
+}
+
+// handleWebUILogs 获取WebUI日志
+func (s *HTTPServer) handleWebUILogs(w http.ResponseWriter, r *http.Request) {
+	// 处理OPTIONS请求
+	if r.Method == "OPTIONS" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Cache-Control")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// 设置SSE头
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Cache-Control")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+	// 创建日志流
+	logChan := make(chan string, 100)
+	s.webUILogMutex.Lock()
+	s.webUILogChannels = append(s.webUILogChannels, logChan)
+	s.webUILogMutex.Unlock()
+
+	// 发送初始状态
+	fmt.Fprintf(w, "data: %s\n\n", "WebUI日志流已连接")
+	if f, ok := w.(http.Flusher); ok && f != nil {
+		// 使用defer recover来捕获任何panic
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("WebUI日志初始刷新时发生panic: %v", r)
+			}
+		}()
+		f.Flush()
+	}
+
+	// 发送当前WebUI状态
+	status := s.getWebUIStatus()
+
+	// 简化的日志流 - 只发送状态更新
+	go func() {
+		defer func() {
+			// 清理通道
+			s.webUILogMutex.Lock()
+			for i, ch := range s.webUILogChannels {
+				if ch == logChan {
+					s.webUILogChannels = append(s.webUILogChannels[:i], s.webUILogChannels[i+1:]...)
+					break
+				}
+			}
+			s.webUILogMutex.Unlock()
+			close(logChan)
+		}()
+
+		// 监听客户端断开连接
+		ctx := r.Context()
+		done := ctx.Done()
+
+		// 发送状态更新
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		// 用于安全写入的辅助函数
+		safeWrite := func(data string) bool {
+			// 检查连接是否仍然有效
+			if ctx.Err() != nil {
+				return false
+			}
+
+			// 检查 ResponseWriter 是否为 nil
+			if w == nil {
+				return false
+			}
+
+			// 尝试写入数据
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				log.Printf("WebUI日志写入失败: %v", err)
+				return false
+			}
+
+			// 尝试刷新 - 添加更严格的nil检查
+			if f, ok := w.(http.Flusher); ok && f != nil {
+				// 使用defer recover来捕获任何panic
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("WebUI日志刷新时发生panic: %v", r)
+					}
+				}()
+				f.Flush()
+			}
+			return true
+		}
+
+		// 发送初始状态
+		statusMsg := fmt.Sprintf("WebUI状态: %s (端口开放: %v, API响应: %v)",
+			status["status"], status["port_open"], status["api_responding"])
+		if !safeWrite(statusMsg) {
+			return
+		}
+
+		for {
+			select {
+			case log, ok := <-logChan:
+				if !ok {
+					return
+				}
+				if !safeWrite(log) {
+					return
+				}
+			case <-ticker.C:
+				// 发送状态更新
+				currentStatus := s.getWebUIStatus()
+				statusMsg := fmt.Sprintf("WebUI状态: %s (端口开放: %v, API响应: %v)",
+					currentStatus["status"], currentStatus["port_open"], currentStatus["api_responding"])
+				if !safeWrite(statusMsg) {
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+}
+
+// startWebUIProcess 启动WebUI进程
+func (s *HTTPServer) startWebUIProcess() {
+	s.webUIStatus = "starting"
+	s.broadcastWebUILog("开始启动WebUI进程...")
+
+	// 获取WebUI路径
+	pathManager := paths.GetPathManager()
+	webuiDir := pathManager.GetWebUIDir()
+	webuiBat := pathManager.GetWebUIBat()
+
+	s.broadcastWebUILog(fmt.Sprintf("WebUI目录: %s", webuiDir))
+	s.broadcastWebUILog(fmt.Sprintf("WebUI批处理文件: %s", webuiBat))
+
+	// 检查WebUI目录和文件是否存在
+	if _, err := os.Stat(webuiDir); os.IsNotExist(err) {
+		s.broadcastWebUILog(fmt.Sprintf("❌ 错误: WebUI目录不存在: %s", webuiDir))
+		s.webUIStatus = "error"
+		return
+	}
+
+	if _, err := os.Stat(webuiBat); os.IsNotExist(err) {
+		s.broadcastWebUILog(fmt.Sprintf("❌ 错误: WebUI批处理文件不存在: %s", webuiBat))
+		s.webUIStatus = "error"
+		return
+	}
+
+	// 根据操作系统选择命令
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		// Windows: 直接运行webui.bat
+		cmd = exec.Command("cmd", "/c", webuiBat, "--api", "--listen", "--port", "7860", "--skip-python-version-check")
+		cmd.Dir = webuiDir
+		s.broadcastWebUILog("使用Windows直接运行webui.bat")
+	} else {
+		// Linux/Mac: 运行webui.sh
+		webuiSh := filepath.Join(webuiDir, "webui.sh")
+		cmd = exec.Command("bash", webuiSh, "--api", "--listen", "--port", "7860", "--skip-python-version-check")
+		cmd.Dir = webuiDir
+		s.broadcastWebUILog("使用Linux/Mac直接运行webui.sh")
+	}
+
+	// 设置环境变量
+	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
+
+	// 设置输出管道
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		s.broadcastWebUILog(fmt.Sprintf("❌ 创建stdout管道失败: %v", err))
+		s.webUIStatus = "error"
+		return
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		s.broadcastWebUILog(fmt.Sprintf("❌ 创建stderr管道失败: %v", err))
+		s.webUIStatus = "error"
+		return
+	}
+
+	s.broadcastWebUILog("✅ 输出管道创建成功")
+
+	// 启动进程
+	s.broadcastWebUILog("正在启动WebUI进程...")
+	if err := cmd.Start(); err != nil {
+		s.broadcastWebUILog(fmt.Sprintf("❌ 启动WebUI失败: %v", err))
+		s.webUIStatus = "error"
+		return
+	}
+
+	s.webUIProcess = cmd.Process
+	s.webUIStatus = "running"
+	s.broadcastWebUILog("✅ WebUI进程启动成功")
+	s.broadcastWebUILog(fmt.Sprintf("📋 进程ID: %d", cmd.Process.Pid))
+	s.broadcastWebUILog("⏳ 等待WebUI输出...")
+
+	// 启动心跳日志
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if s.webUIStatus == "running" {
+					s.broadcastWebUILog("WebUI heartbeat - process is running")
+				} else {
+					return
+				}
+			}
+		}
+	}()
+
+	// 读取输出
+	go func() {
+		defer stdout.Close()
+		s.broadcastWebUILog("📖 开始读取STDOUT...")
+		scanner := bufio.NewScanner(stdout)
+		lineCount := 0
+		for scanner.Scan() {
+			line := scanner.Text()
+			lineCount++
+			if line != "" {
+				s.broadcastWebUILog(fmt.Sprintf("📤 [%d] %s", lineCount, line))
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			s.broadcastWebUILog(fmt.Sprintf("❌ STDOUT扫描错误: %v", err))
+		}
+		s.broadcastWebUILog(fmt.Sprintf("📤 STDOUT流已关闭 (共读取 %d 行)", lineCount))
+	}()
+
+	// 如果WebUI已经运行，发送一些测试日志
+	go func() {
+		time.Sleep(2 * time.Second)
+		if s.webUIStatus == "running" {
+			s.broadcastWebUILog("🔍 正在检查WebUI输出...")
+			s.broadcastWebUILog("💡 如果WebUI没有输出，可能是缓冲问题")
+		}
+	}()
+
+	go func() {
+		defer stderr.Close()
+		s.broadcastWebUILog("📖 开始读取STDERR...")
+		scanner := bufio.NewScanner(stderr)
+		lineCount := 0
+		for scanner.Scan() {
+			line := scanner.Text()
+			lineCount++
+			if line != "" {
+				s.broadcastWebUILog(fmt.Sprintf("⚠️ [%d] %s", lineCount, line))
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			s.broadcastWebUILog(fmt.Sprintf("❌ STDERR扫描错误: %v", err))
+		}
+		s.broadcastWebUILog(fmt.Sprintf("⚠️ STDERR流已关闭 (共读取 %d 行)", lineCount))
+	}()
+
+	// 等待进程结束
+	go func() {
+		s.broadcastWebUILog("⏳ 等待WebUI进程结束...")
+		err := cmd.Wait()
+		s.webUIStatus = "stopped"
+		if err != nil {
+			s.broadcastWebUILog(fmt.Sprintf("❌ WebUI进程异常退出: %v", err))
+		} else {
+			s.broadcastWebUILog("✅ WebUI进程正常退出")
+		}
+		s.webUIProcess = nil
+	}()
+}
+
+// stopWebUIGeneration 停止WebUI的当前生成任务
+func (s *HTTPServer) stopWebUIGeneration() error {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	// 调用WebUI的interrupt API
+	resp, err := client.Post("http://127.0.0.1:7860/sdapi/v1/interrupt", "application/json", nil)
+	if err != nil {
+		return fmt.Errorf("调用WebUI停止API失败: %v", err)
+	}
+	defer func() {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("WebUI停止API返回错误状态码: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// stopWebUIProcess 停止WebUI进程
+func (s *HTTPServer) stopWebUIProcess() {
+	if s.webUIProcess != nil {
+		s.webUIStatus = "stopping"
+		s.broadcastWebUILog("Stopping WebUI process...")
+
+		// 先尝试优雅关闭
+		if err := s.webUIProcess.Signal(os.Interrupt); err != nil {
+			s.broadcastWebUILog(fmt.Sprintf("Failed to send interrupt signal: %v", err))
+		}
+
+		// 等待进程优雅关闭
+		done := make(chan error, 1)
+		go func() {
+			_, err := s.webUIProcess.Wait()
+			done <- err
+		}()
+
+		select {
+		case <-time.After(5 * time.Second):
+			// 超时，强制终止
+			s.broadcastWebUILog("WebUI process did not stop gracefully, forcing termination...")
+			// 只终止特定的WebUI进程，不终止所有Python进程
+			s.webUIProcess.Kill()
+		case err := <-done:
+			if err != nil {
+				s.broadcastWebUILog(fmt.Sprintf("WebUI process exited with error: %v", err))
+			} else {
+				s.broadcastWebUILog("WebUI process stopped gracefully")
+			}
+		}
+
+		s.webUIProcess = nil
+		s.webUIStatus = "stopped"
+		s.broadcastWebUILog("WebUI process stopped")
+	}
+}
+
+// isWebUIRunning 检查WebUI是否在运行
+func (s *HTTPServer) isWebUIRunning() bool {
+	// 检查内部管理的WebUI进程
+	if s.webUIProcess != nil && s.webUIStatus == "running" {
+		return true
+	}
+
+	// 检查外部WebUI（通过端口和API响应）
+	portOpen := s.checkPort(7860)
+	apiResponding := s.checkWebUIAPI()
+
+	return portOpen && apiResponding
+}
+
+// getWebUIStatus 获取WebUI状态
+func (s *HTTPServer) getWebUIStatus() map[string]interface{} {
+	// 检查端口是否被占用
+	portOpen := s.checkPort(7860)
+
+	// 检查 WebUI API 是否响应
+	apiResponding := s.checkWebUIAPI()
+
+	// 确定实际状态
+	var actualStatus string
+	if s.webUIProcess != nil && portOpen && apiResponding {
+		actualStatus = "running"
+	} else if s.webUIProcess != nil && !portOpen {
+		actualStatus = "starting"
+	} else if portOpen && apiResponding {
+		actualStatus = "external" // 外部启动的 WebUI
+	} else {
+		actualStatus = "stopped"
+	}
+
+	return map[string]interface{}{
+		"status":         actualStatus,
+		"port_open":      portOpen,
+		"api_responding": apiResponding,
+		"process_id":     s.webUIProcess != nil,
+		"managed":        s.webUIProcess != nil, // 是否由后端管理
+	}
+}
+
+// checkPort 检查端口是否被占用
+func (s *HTTPServer) checkPort(port int) bool {
+	// 简单的端口检查实现
+	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// checkWebUIAPI 检查 WebUI API 是否响应
+func (s *HTTPServer) checkWebUIAPI() bool {
+	// 尝试访问 WebUI API 的状态端点
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+	resp, err := client.Get("http://127.0.0.1:7860/sdapi/v1/options")
+	if err != nil {
+		return false
+	}
+	defer func() {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+	}()
+	return resp.StatusCode == http.StatusOK
+}
+
+// broadcastWebUILog 广播WebUI日志
+func (s *HTTPServer) broadcastWebUILog(message string) {
+	timestamp := time.Now().Format("15:04:05")
+	logMessage := fmt.Sprintf("[%s] %s", timestamp, message)
+
+	// 发送到所有日志通道
+	s.webUILogMutex.RLock()
+	channels := make([]chan string, len(s.webUILogChannels))
+	copy(channels, s.webUILogChannels)
+	s.webUILogMutex.RUnlock()
+
+	for _, ch := range channels {
+		select {
+		case ch <- logMessage:
+			// 成功发送
+		default:
+			// 通道已满，移除该通道
+			s.webUILogMutex.Lock()
+			for j, originalCh := range s.webUILogChannels {
+				if originalCh == ch {
+					s.webUILogChannels = append(s.webUILogChannels[:j], s.webUILogChannels[j+1:]...)
+					break
+				}
+			}
+			s.webUILogMutex.Unlock()
+			close(ch)
+		}
+	}
+}
+
 // 启动服务器
 func (s *HTTPServer) Start(port string) error {
 	// 使用统一的logger系统
 	fmt.Printf("Starting HTTP server on port %s\n", port)
 	fmt.Printf("HTTP server is ready to accept connections\n")
 
+	// 应用CORS中间件
+	handler := s.corsMiddleware(s.router)
+
 	// 启动服务器
-	err := http.ListenAndServe(":"+port, s.router)
+	err := http.ListenAndServe(":"+port, handler)
 	if err != nil {
 		fmt.Printf("HTTP server error: %v\n", err)
 	}
 	return err
+}
+
+// StopWebUI 停止WebUI进程
+func (s *HTTPServer) StopWebUI() {
+	if s.webUIProcess != nil {
+		s.webUIStatus = "stopping"
+		s.broadcastWebUILog("主程序关闭，正在停止WebUI进程...")
+
+		// 先尝试优雅关闭
+		if err := s.webUIProcess.Signal(os.Interrupt); err != nil {
+			s.broadcastWebUILog(fmt.Sprintf("Failed to send interrupt signal: %v", err))
+		}
+
+		// 等待进程优雅关闭
+		done := make(chan error, 1)
+		go func() {
+			_, err := s.webUIProcess.Wait()
+			done <- err
+		}()
+
+		select {
+		case <-time.After(3 * time.Second):
+			// 超时，强制终止
+			s.broadcastWebUILog("WebUI process did not stop gracefully, forcing termination...")
+			if runtime.GOOS == "windows" {
+				// Windows: 使用taskkill强制终止
+				exec.Command("taskkill", "/f", "/im", "python.exe").Run()
+			}
+			s.webUIProcess.Kill()
+		case err := <-done:
+			if err != nil {
+				s.broadcastWebUILog(fmt.Sprintf("WebUI process exited with error: %v", err))
+			} else {
+				s.broadcastWebUILog("WebUI process stopped gracefully")
+			}
+		}
+
+		s.webUIProcess = nil
+		s.webUIStatus = "stopped"
+		s.broadcastWebUILog("WebUI进程已停止")
+	}
 }

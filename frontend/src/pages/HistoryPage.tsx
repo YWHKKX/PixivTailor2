@@ -35,7 +35,7 @@ const { Title, Text } = Typography;
 const { Option } = Select;
 const { RangePicker } = DatePicker;
 const { Search } = Input;
-const { TabPane } = Tabs;
+// 不再需要 TabPane，使用 items 属性
 
 interface HistoryItem {
     id: string;
@@ -70,8 +70,7 @@ const HistoryPage: React.FC = () => {
     const loadHistoryData = async () => {
         setLoading(true);
         try {
-            const response = await apiService.getTasks(1, 100); // 获取前100个任务
-            const tasks = response.tasks;
+            const tasks = await apiService.getTasks(); // 获取任务列表
 
             // 转换任务数据为历史记录格式
             const historyItems: HistoryItem[] = tasks.map(task => ({
@@ -484,37 +483,50 @@ const HistoryPage: React.FC = () => {
                             </Button>
                         </Space>
                     }
-                >
-                    <TabPane tab={`全部 (${historyData.length})`} key="all">
-                        <Spin spinning={loading}>
-                            <Table
-                                columns={columns}
-                                dataSource={filteredData}
-                                rowKey="id"
-                                pagination={{ pageSize: 10 }}
-                                scroll={{ x: 1000 }}
-                            />
-                        </Spin>
-                    </TabPane>
-                    <TabPane tab={`生成任务 (${generationCount})`} key="generation">
-                        <Table
-                            columns={columns}
-                            dataSource={filteredData.filter(item => item.type === 'generation')}
-                            rowKey="id"
-                            pagination={{ pageSize: 10 }}
-                            scroll={{ x: 1000 }}
-                        />
-                    </TabPane>
-                    <TabPane tab={`爬取任务 (${crawlCount})`} key="crawl">
-                        <Table
-                            columns={columns}
-                            dataSource={filteredData.filter(item => item.type === 'crawl')}
-                            rowKey="id"
-                            pagination={{ pageSize: 10 }}
-                            scroll={{ x: 1000 }}
-                        />
-                    </TabPane>
-                </Tabs>
+                    items={[
+                        {
+                            key: 'all',
+                            label: `全部 (${historyData.length})`,
+                            children: (
+                                <Spin spinning={loading}>
+                                    <Table
+                                        columns={columns}
+                                        dataSource={filteredData}
+                                        rowKey="id"
+                                        pagination={{ pageSize: 10 }}
+                                        scroll={{ x: 1000 }}
+                                    />
+                                </Spin>
+                            )
+                        },
+                        {
+                            key: 'generation',
+                            label: `生成任务 (${generationCount})`,
+                            children: (
+                                <Table
+                                    columns={columns}
+                                    dataSource={filteredData.filter(item => item.type === 'generation')}
+                                    rowKey="id"
+                                    pagination={{ pageSize: 10 }}
+                                    scroll={{ x: 1000 }}
+                                />
+                            )
+                        },
+                        {
+                            key: 'crawl',
+                            label: `爬取任务 (${crawlCount})`,
+                            children: (
+                                <Table
+                                    columns={columns}
+                                    dataSource={filteredData.filter(item => item.type === 'crawl')}
+                                    rowKey="id"
+                                    pagination={{ pageSize: 10 }}
+                                    scroll={{ x: 1000 }}
+                                />
+                            )
+                        }
+                    ]}
+                />
             </Card>
 
             {/* 详情模态框 */}

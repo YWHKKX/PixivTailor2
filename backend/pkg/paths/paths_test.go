@@ -31,7 +31,7 @@ func TestPathManager(t *testing.T) {
 	}
 
 	// 测试配置目录
-	expectedConfigDir := filepath.Join(tempDir, "backend", "configs")
+	expectedConfigDir := filepath.Join(tempDir, "backend", "global_configs")
 	if pm.GetConfigDir() != expectedConfigDir {
 		t.Errorf("期望配置目录 %s，实际 %s", expectedConfigDir, pm.GetConfigDir())
 	}
@@ -63,7 +63,7 @@ func TestPathManager(t *testing.T) {
 
 	// 测试配置文件路径
 	configPath := pm.GetCrawlerConfigPath()
-	expectedConfigPath := filepath.Join(tempDir, "backend", "configs", "crawler_config.json")
+	expectedConfigPath := filepath.Join(tempDir, "backend", "global_configs", "crawler_config.json")
 	if configPath != expectedConfigPath {
 		t.Errorf("期望配置文件路径 %s，实际 %s", expectedConfigPath, configPath)
 	}

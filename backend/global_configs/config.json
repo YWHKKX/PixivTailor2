@@ -2,7 +2,7 @@
     "system": {
         "paths": {
             "base_dir": ".",
-            "config_dir": "backend/configs",
+            "config_dir": "backend/global_configs",
             "data_dir": "backend/data",
             "log_dir": "backend/data/logs",
             "temp_dir": "backend/data/temp",
@@ -47,8 +47,8 @@
             "name": "ai",
             "version": "1.0.0",
             "enabled": true,
-            "stable_diffusion": {
-                "api_url": "http://127.0.0.1:7860/sdapi/v1",
+            "sd_webui": {
+                "url": "http://127.0.0.1:7860",
                 "timeout": 300,
                 "retry_count": 3,
                 "default_model": "chosenMix_bakedVae.safetensors",

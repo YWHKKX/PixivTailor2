@@ -92,6 +92,7 @@ type GenerateRequest struct {
 	Loras          []LoraConfig           `json:"loras"`
 	Poses          []PoseConfig           `json:"poses"`
 	BatchSize      int                    `json:"batch_size"`
+	BatchCount     int                    `json:"batch_count"`
 	Steps          int                    `json:"steps"`
 	CFGScale       float64                `json:"cfg_scale"`
 	Width          int                    `json:"width"`
@@ -105,9 +106,16 @@ type GenerateRequest struct {
 
 // LoraConfig LoRA配置
 type LoraConfig struct {
-	Name   string  `json:"name"`
-	Weight float64 `json:"weight"`
-	Path   string  `json:"path,omitempty"`
+	Name        string   `json:"name"`                  // LoRA名称
+	FullName    string   `json:"full_name,omitempty"`   // 完整名称（包含hash）
+	Weight      float64  `json:"weight"`                // 权重
+	Path        string   `json:"path,omitempty"`        // 文件路径
+	Tags        []string `json:"tags,omitempty"`        // 关联标签
+	UseMask     bool     `json:"use_mask,omitempty"`    // 是否使用遮罩
+	Description string   `json:"description,omitempty"` // 描述
+	// 新增字段用于权重写入关键词
+	ExtendTags []string `json:"extend_tags,omitempty"` // 扩展标签（用于权重写入）
+	LoraKey    string   `json:"lora_key,omitempty"`    // LoRA键名（用于权重写入）
 }
 
 // PoseConfig 姿态配置

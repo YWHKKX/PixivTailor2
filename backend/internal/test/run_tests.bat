@@ -38,6 +38,11 @@ echo 📊 运行数据模型测试...
 go test -v ./tests -run TestDataModels
 
 echo.
+echo 🤖 运行AI模块测试...
+go test -v ./unit -run TestAIHandler
+go test -v ./unit -run TestGenerationConfigService
+
+echo.
 echo 🔗 运行集成测试...
 go test -v ./tests -run TestIntegration
 

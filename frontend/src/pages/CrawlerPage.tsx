@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { API_BASE_URL, IMAGE_BASE_URL } from '../config/ports';
 import {
     Row,
     Col,
@@ -181,17 +182,131 @@ const CrawlerPage: React.FC = () => {
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
     const [fileTreeLoading, setFileTreeLoading] = useState(false);
     const fileTreeRefreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const fileTreeScrollRef = useRef<HTMLDivElement>(null);
+    const [viewMode, setViewMode] = useState<'tree' | 'grid'>('tree');
+    const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const [shouldRestoreScroll, setShouldRestoreScroll] = useState(false);
+    const lastClickTimeRef = useRef<number>(0);
+    const isLoadingFileTreeRef = useRef<boolean>(false);
+    const hasLoadedFileTreeRef = useRef<boolean>(false);
+    const lastScrollTopRef = useRef<number>(0);
+    const fileTreeDataCacheRef = useRef<FileTreeNode[] | null>(null);
+    const lastBackendTreeRef = useRef<string>('');
 
-    // 优化的文件树状态
-    const [fileTreeMap, setFileTreeMap] = useState<Map<string, FileTreeNode>>(new Map());
-    const [fileTreeHeight] = useState(500);
+
+    // 防抖保存滚动位置
+    const debouncedSaveScrollPosition = useCallback((scrollTop: number) => {
+        // 立即保存滚动位置，不等待防抖
+        lastScrollTopRef.current = scrollTop;
+
+        if (scrollTimeoutRef.current) {
+            clearTimeout(scrollTimeoutRef.current);
+        }
+        scrollTimeoutRef.current = setTimeout(() => {
+            // 防抖后再次确认保存
+            lastScrollTopRef.current = scrollTop;
+        }, 100); // 100ms防抖
+    }, []);
+
+    // 恢复文件树滚动位置
+    useEffect(() => {
+        if (shouldRestoreScroll && fileTreeScrollRef.current && lastScrollTopRef.current > 0) {
+            // 使用setTimeout确保DOM已更新
+            setTimeout(() => {
+                if (fileTreeScrollRef.current) {
+                    fileTreeScrollRef.current.scrollTop = lastScrollTopRef.current;
+                }
+                setShouldRestoreScroll(false); // 重置标志
+            }, 100); // 稍微延迟确保DOM完全更新
+        }
+    }, [shouldRestoreScroll, fileTreeData]); // 当文件树数据变化时也尝试恢复滚动位置
+
+    // 自动恢复滚动位置（当文件树数据变化时）
+    useEffect(() => {
+        if (fileTreeScrollRef.current && lastScrollTopRef.current > 0 && !shouldRestoreScroll) {
+            // 延迟恢复，确保DOM已完全渲染
+            setTimeout(() => {
+                if (fileTreeScrollRef.current) {
+                    fileTreeScrollRef.current.scrollTop = lastScrollTopRef.current;
+                }
+            }, 50);
+        }
+    }, [fileTreeData, viewMode]); // 只在文件树数据或视图模式变化时恢复滚动位置
+
+    // 在每次组件渲染后尝试恢复滚动位置（处理React严格模式的双重调用）
+    useEffect(() => {
+        if (fileTreeScrollRef.current && lastScrollTopRef.current > 0) {
+            // 立即尝试恢复
+            fileTreeScrollRef.current.scrollTop = lastScrollTopRef.current;
+
+            // 延迟再次恢复，确保DOM已完全渲染
+            setTimeout(() => {
+                if (fileTreeScrollRef.current) {
+                    fileTreeScrollRef.current.scrollTop = lastScrollTopRef.current;
+                }
+            }, 50);
+
+            // 再次延迟恢复，确保所有异步操作完成
+            setTimeout(() => {
+                if (fileTreeScrollRef.current) {
+                    fileTreeScrollRef.current.scrollTop = lastScrollTopRef.current;
+                }
+            }, 200);
+        }
+    }); // 没有依赖数组，每次渲染后都执行
+
+    // 处理图片选择
+    const handleImageSelect = useCallback((filePath: string) => {
+        setSelectedImage(filePath);
+    }, []);
+
+    // 处理展开/收起
+    const handleToggleExpand = useCallback((key: string) => {
+        setExpandedKeys(prev => {
+            const isExpanded = prev.includes(key);
+            return isExpanded
+                ? prev.filter(k => k !== key)
+                : [...prev, key];
+        });
+    }, []);
+
+    // 稳定的滚动处理函数
+    const handleScroll = useCallback((scrollTop: number) => {
+        debouncedSaveScrollPosition(scrollTop);
+    }, [debouncedSaveScrollPosition]);
+
+    // 判断是否为图片文件
+    const isImageFile = useCallback((filePath: string): boolean => {
+        const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'];
+        const ext = filePath.toLowerCase().substring(filePath.lastIndexOf('.'));
+        return imageExtensions.includes(ext);
+    }, []);
+
+    // 获取所有图片文件（用于网格视图）
+    const getAllImageFiles = useCallback((nodes: FileTreeNode[]): FileTreeNode[] => {
+        const imageFiles: FileTreeNode[] = [];
+        const traverse = (nodeList: FileTreeNode[]) => {
+            nodeList.forEach(node => {
+                if (node.isLeaf && node.filePath && isImageFile(node.filePath)) {
+                    imageFiles.push(node);
+                }
+                if (node.children) {
+                    traverse(node.children);
+                }
+            });
+        };
+        traverse(nodes);
+        return imageFiles;
+    }, [isImageFile]);
 
     // 加载任务数据
     const loadTasks = async () => {
         try {
             setLoading(true);
-            const response = await apiService.getTasks(1, 20, '', 'crawl');
-            setTasks(response.tasks || []);
+            const tasks = await apiService.getTasks();
+            // 只显示爬虫任务
+            const crawlTasks = tasks.filter(task => task.type === 'crawl');
+            setTasks(crawlTasks);
         } catch (error) {
             console.error('加载任务失败:', error);
             message.error('加载任务失败');
@@ -205,17 +320,21 @@ const CrawlerPage: React.FC = () => {
     // 加载文件树数据
     const loadFileTree = async (force = false) => {
         // 防止重复加载
-        if (fileTreeLoading && !force) {
-            console.log('文件树正在加载中，跳过重复请求');
+        if (isLoadingFileTreeRef.current && !force) {
+            return;
+        }
+
+        // 如果已经加载过且不是强制刷新，跳过
+        if (hasLoadedFileTreeRef.current && !force) {
             return;
         }
 
         try {
+            isLoadingFileTreeRef.current = true;
             setFileTreeLoading(true);
-            console.log('开始加载文件树...');
 
             // 从后端API获取真实的文件树数据
-            const response = await fetch('http://localhost:50052/api/filetree', {
+            const response = await fetch(`${API_BASE_URL}/filetree`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -230,16 +349,29 @@ const CrawlerPage: React.FC = () => {
             const data = await response.json();
             const backendFileTree = data.data.fileTree;
 
-            // 转换后端数据为前端格式
-            const fileTreeData = convertBackendFileTreeToFrontend(backendFileTree);
+            // 检查后端数据是否变化，避免不必要的重新转换
+            const backendTreeString = JSON.stringify(backendFileTree);
+            let fileTreeData: FileTreeNode[];
 
-            // 构建扁平化映射
-            const treeMap = buildFileTreeMap(fileTreeData);
+            if (backendTreeString === lastBackendTreeRef.current && fileTreeDataCacheRef.current) {
+                // 使用缓存的数据
+                fileTreeData = fileTreeDataCacheRef.current;
+            } else {
+                // 转换后端数据为前端格式
+                fileTreeData = convertBackendFileTreeToFrontend(backendFileTree);
+                // 更新缓存
+                fileTreeDataCacheRef.current = fileTreeData;
+                lastBackendTreeRef.current = backendTreeString;
+            }
 
             setFileTreeData(fileTreeData);
-            setFileTreeMap(treeMap);
-            setExpandedKeys(['images']);
-            console.log('文件树加载完成，数据:', fileTreeData);
+            // 只在expandedKeys为空时才设置默认值，避免不必要的重新渲染
+            setExpandedKeys(prev => prev.length === 0 ? ['images'] : prev);
+            // 只在强制刷新时恢复滚动位置
+            if (force) {
+                setShouldRestoreScroll(true);
+            }
+            hasLoadedFileTreeRef.current = true;
         } catch (error) {
             console.error('加载文件树失败:', error);
             message.error('加载文件树失败');
@@ -260,6 +392,7 @@ const CrawlerPage: React.FC = () => {
             }];
             setFileTreeData(emptyTree);
         } finally {
+            isLoadingFileTreeRef.current = false;
             setFileTreeLoading(false);
         }
     };
@@ -289,20 +422,6 @@ const CrawlerPage: React.FC = () => {
         return [convertNode(backendTree, 0)];
     };
 
-    // 构建扁平化的文件树映射（优化性能）
-    const buildFileTreeMap = (treeData: FileTreeNode[]): Map<string, FileTreeNode> => {
-        const map = new Map<string, FileTreeNode>();
-
-        const processNode = (node: FileTreeNode) => {
-            map.set(node.key, node);
-            if (node.children) {
-                node.children.forEach(processNode);
-            }
-        };
-
-        treeData.forEach(processNode);
-        return map;
-    };
 
 
 
@@ -327,13 +446,9 @@ const CrawlerPage: React.FC = () => {
 
         // 监听WebSocket消息
         const handleTaskUpdate = (data: any) => {
-            console.log('收到任务更新:', data);
-            console.log('当前任务列表:', tasks?.map(t => ({ id: t.id, status: t.status, progress: t.progress })));
-
             // 更新任务状态、进度和图片数量
             setTasks(prev => {
                 const updatedTasks = (prev || []).map(task => {
-                    console.log('比较任务ID:', task.id, '===', data.task_id, '结果:', task.id === data.task_id);
                     if (task.id === data.task_id) {
                         const updatedTask = { ...task };
                         if (data.status !== undefined) {
@@ -348,29 +463,10 @@ const CrawlerPage: React.FC = () => {
                         if (data.images_downloaded !== undefined) {
                             updatedTask.images_downloaded = data.images_downloaded;
                         }
-                        console.log('更新任务:', task.id, '状态:', data.status, '进度:', data.progress, '图片数量:', data.images_found);
-
-                        // 如果任务完成，防抖刷新文件树（避免重复刷新）
-                        if (data.status === 'completed') {
-                            console.log('任务完成，防抖刷新文件树');
-
-                            // 清除之前的定时器
-                            if (fileTreeRefreshTimeoutRef.current) {
-                                clearTimeout(fileTreeRefreshTimeoutRef.current);
-                            }
-
-                            // 设置新的定时器
-                            fileTreeRefreshTimeoutRef.current = setTimeout(() => {
-                                loadFileTree(true); // 强制刷新
-                                fileTreeRefreshTimeoutRef.current = null;
-                            }, 2000); // 延迟2秒
-                        }
-
                         return updatedTask;
                     }
                     return task;
                 });
-                console.log('更新后的任务列表:', updatedTasks.map(t => ({ id: t.id, status: t.status, progress: t.progress, images_found: t.images_found })));
                 return updatedTasks;
             });
         };
@@ -378,171 +474,162 @@ const CrawlerPage: React.FC = () => {
 
 
         const handleLogMessage = (data: any) => {
-            console.log('收到日志消息:', data);
             // 检查消息类型
             if (data.type === 'log_message') {
                 // 尝试从不同的位置获取数据
                 let logData = data.data || data;
                 const { task_id, level, message, time } = logData;
-                console.log('处理日志消息:', { task_id, level, message, time });
                 if (task_id && level && message) {
                     setTaskLogs(prev => ({
                         ...prev,
                         [task_id]: [...(prev[task_id] || []), { level, message, time }]
                     }));
-                } else {
-                    console.log('日志消息数据不完整:', logData);
                 }
             } else if (data.type === 'global_log') {
                 // 处理全局日志
                 const { level, message, time } = data.data || data;
-                console.log('处理全局日志:', { level, message, time });
                 if (level && message) {
-                    console.log('添加全局日志到状态:', { level, message, time });
                     setGlobalLogs(prev => {
                         const newLogs = [...prev, { level, message, time }];
-                        console.log('更新后的全局日志数量:', newLogs.length);
                         return newLogs;
                     });
-                } else {
-                    console.log('全局日志数据不完整:', { level, message, time });
                 }
             } else {
-                console.log('未知的日志消息类型:', data.type);
+                // 处理直接传递的日志数据（没有type包装）
+                if (data.task_id && data.level && data.message) {
+                    // 这是任务日志
+                    setTaskLogs(prev => ({
+                        ...prev,
+                        [data.task_id]: [...(prev[data.task_id] || []), { level: data.level, message: data.message, time: data.time }]
+                    }));
+                } else if (data.level && data.message && !data.task_id) {
+                    // 这是全局日志
+                    setGlobalLogs(prev => {
+                        const newLogs = [...prev, { level: data.level, message: data.message, time: data.time }];
+                        return newLogs;
+                    });
+                }
             }
         };
 
         // 注册WebSocket事件监听器
-        wsManager.on('taskUpdate', handleTaskUpdate);
-        // wsManager.on('crawlResultsUpdate', handleCrawlResultsUpdate);
-        wsManager.on('logMessage', handleLogMessage);
+        wsManager.on('task_update', handleTaskUpdate);
+        wsManager.on('log_message', handleLogMessage);
+        wsManager.on('global_log', handleLogMessage);
 
         // 清理函数
         return () => {
             clearInterval(interval);
-            wsManager.off('taskUpdate', handleTaskUpdate);
-            // wsManager.off('crawlResultsUpdate', handleCrawlResultsUpdate);
-            wsManager.off('logMessage', handleLogMessage);
+            wsManager.off('task_update', handleTaskUpdate);
+            wsManager.off('log_message', handleLogMessage);
+            wsManager.off('global_log', handleLogMessage);
 
             // 清理文件树刷新定时器
             if (fileTreeRefreshTimeoutRef.current) {
                 clearTimeout(fileTreeRefreshTimeoutRef.current);
                 fileTreeRefreshTimeoutRef.current = null;
             }
+
+            // 清理滚动位置保存定时器
+            if (scrollTimeoutRef.current) {
+                clearTimeout(scrollTimeoutRef.current);
+                scrollTimeoutRef.current = null;
+            }
         };
     }, []);
 
-    // 监听文件树数据变化，用于调试
-    useEffect(() => {
-        console.log('文件树数据变化:', fileTreeData);
-    }, [fileTreeData]);
+    // 原来的FileTreeNodeComponent已移动到VirtualFileTree内部
 
-    // 优化的文件树节点组件
-    const FileTreeNodeComponent = React.memo(({ node, isVisible }: { node: FileTreeNode, isVisible: boolean }) => {
-        const isExpanded = expandedKeys.includes(node.key);
-        const isSelected = selectedImage === node.filePath;
+    // 简化的文件树容器 - 提取为独立组件
+    const VirtualFileTree = React.memo(({
+        fileTreeData,
+        expandedKeys,
+        selectedImage,
+        onImageSelect,
+        onToggleExpand,
+        scrollRef,
+        onScroll
+    }: {
+        fileTreeData: FileTreeNode[];
+        expandedKeys: string[];
+        selectedImage: string | null;
+        onImageSelect: (filePath: string) => void;
+        onToggleExpand: (key: string) => void;
+        scrollRef: React.RefObject<HTMLDivElement>;
+        onScroll: (scrollTop: number) => void;
+    }) => {
 
-        const handleToggle = () => {
-            if (node.children && node.children.length > 0) {
-                const newExpandedKeys = isExpanded
-                    ? expandedKeys.filter(key => key !== node.key)
-                    : [...expandedKeys, node.key];
-                setExpandedKeys(newExpandedKeys);
-            }
-        };
+        // 文件树节点组件
+        const FileTreeNodeComponent = React.memo(({ node, isVisible }: { node: FileTreeNode, isVisible: boolean }) => {
+            const isExpanded = expandedKeys.includes(node.key);
+            const isSelected = selectedImage === node.filePath;
 
-        const handleSelect = () => {
-            if (node.isLeaf && node.filePath) {
-                setSelectedImage(node.filePath);
-            }
-        };
+            const handleToggle = () => {
+                if (node.children && node.children.length > 0) {
+                    onToggleExpand(node.key);
+                }
+            };
 
-        if (!isVisible) return null;
+            const handleSelect = () => {
+                if (node.isLeaf && node.filePath) {
+                    onImageSelect(node.filePath);
+                }
+            };
 
-        return (
-            <div
-                style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    padding: '4px 8px',
-                    marginLeft: `${(node.level || 0) * 20}px`,
-                    borderRadius: '4px',
-                    cursor: node.isLeaf ? 'pointer' : 'default',
-                    backgroundColor: isSelected ? '#e6f7ff' : 'transparent',
-                    transition: 'all 0.2s ease',
-                    height: '32px',
-                    minHeight: '32px'
-                }}
-                onClick={handleSelect}
-                onMouseEnter={(e) => {
-                    if (!isSelected) {
-                        e.currentTarget.style.backgroundColor = '#f5f5f5';
-                    }
-                }}
-                onMouseLeave={(e) => {
-                    if (!isSelected) {
-                        e.currentTarget.style.backgroundColor = 'transparent';
-                    }
-                }}
-            >
-                {/* 展开/收起按钮 */}
-                {node.children && node.children.length > 0 && (
-                    <div
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            handleToggle();
-                        }}
-                        style={{
-                            width: '16px',
-                            height: '16px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            marginRight: '8px',
-                            cursor: 'pointer',
-                            borderRadius: '2px',
-                            transition: 'all 0.2s ease'
-                        }}
-                    >
-                        {isExpanded ? '▼' : '▶'}
-                    </div>
-                )}
+            if (!isVisible) return null;
 
-                {/* 图标 */}
-                <div style={{ marginRight: '8px', display: 'flex', alignItems: 'center' }}>
-                    {node.icon}
-                </div>
-
-                {/* 标题和文件信息 */}
-                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <span style={{
-                        fontSize: '14px',
-                        color: node.isLeaf ? '#333' : '#1890ff',
-                        fontWeight: node.isLeaf ? 'normal' : '500'
-                    }}>
-                        {node.title}
-                    </span>
-
-                    {node.isLeaf && node.fileSize && (
-                        <span style={{
-                            fontSize: '12px',
-                            color: '#999',
-                            marginLeft: '8px'
-                        }}>
-                            {formatFileSize(node.fileSize)}
-                        </span>
+            return (
+                <div
+                    key={node.key}
+                    className="file-tree-node"
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: '4px 8px',
+                        cursor: node.isLeaf ? 'pointer' : 'default',
+                        backgroundColor: isSelected ? '#e6f7ff' : 'transparent',
+                        borderLeft: isSelected ? '3px solid #1890ff' : '3px solid transparent',
+                        height: '32px',
+                        minHeight: '32px'
+                    }}
+                    onClick={handleSelect}
+                    onMouseEnter={(e) => {
+                        if (!isSelected) {
+                            e.currentTarget.style.backgroundColor = '#f5f5f5';
+                        }
+                    }}
+                    onMouseLeave={(e) => {
+                        if (!isSelected) {
+                            e.currentTarget.style.backgroundColor = 'transparent';
+                        }
+                    }}
+                >
+                    {/* 展开/收起按钮 */}
+                    {node.children && node.children.length > 0 && (
+                        <div
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                handleToggle();
+                            }}
+                            style={{
+                                marginRight: '8px',
+                                cursor: 'pointer',
+                                fontSize: '12px',
+                                width: '16px',
+                                textAlign: 'center'
+                            }}
+                        >
+                            {isExpanded ? '▼' : '▶'}
+                        </div>
                     )}
+                    {/* 文件/文件夹图标 */}
+                    <span style={{ marginRight: '8px', fontSize: '14px' }}>
+                        {node.isLeaf ? '📄' : '📁'}
+                    </span>
+                    {/* 文件名 */}
+                    <span style={{ flex: 1, fontSize: '14px' }}>{node.title}</span>
                 </div>
-            </div>
-        );
-    });
-
-    // 简化的文件树容器
-    const VirtualFileTree = React.memo(() => {
-        console.log('VirtualFileTree 渲染:', {
-            fileTreeData,
-            fileTreeMap: Array.from(fileTreeMap.entries()),
-            expandedKeys
+            );
         });
 
         // 直接渲染文件树数据，不使用虚拟滚动
@@ -564,12 +651,14 @@ const CrawlerPage: React.FC = () => {
 
         return (
             <div
+                ref={scrollRef}
                 style={{
-                    height: `${fileTreeHeight}px`,
+                    flex: 1,
                     overflow: 'auto',
-                    border: '1px solid #d9d9d9',
-                    borderRadius: '6px',
                     backgroundColor: '#fafafa'
+                }}
+                onScroll={(e) => {
+                    onScroll(e.currentTarget.scrollTop);
                 }}
             >
                 <div style={{ padding: '8px' }}>
@@ -580,6 +669,130 @@ const CrawlerPage: React.FC = () => {
                     )}
                 </div>
             </div>
+        );
+    }, (prevProps, nextProps) => {
+        // 自定义比较函数，只有当真正需要的数据变化时才重新渲染
+        return (
+            prevProps.fileTreeData === nextProps.fileTreeData &&
+            prevProps.expandedKeys === nextProps.expandedKeys &&
+            prevProps.selectedImage === nextProps.selectedImage &&
+            prevProps.onImageSelect === nextProps.onImageSelect &&
+            prevProps.onToggleExpand === nextProps.onToggleExpand &&
+            prevProps.scrollRef === nextProps.scrollRef &&
+            prevProps.onScroll === nextProps.onScroll
+        );
+    });
+
+    // 网格视图组件 - 提取为独立组件
+    const GridView = React.memo(({
+        fileTreeData,
+        selectedImage,
+        onImageSelect,
+        scrollRef,
+        onScroll
+    }: {
+        fileTreeData: FileTreeNode[];
+        selectedImage: string | null;
+        onImageSelect: (filePath: string) => void;
+        scrollRef: React.RefObject<HTMLDivElement>;
+        onScroll: (scrollTop: number) => void;
+    }) => {
+        const imageFiles = getAllImageFiles(fileTreeData);
+
+        return (
+            <div
+                ref={scrollRef}
+                style={{
+                    flex: 1,
+                    overflow: 'auto',
+                    backgroundColor: '#fafafa',
+                    padding: '16px'
+                }}
+                onScroll={(e) => {
+                    onScroll(e.currentTarget.scrollTop);
+                }}
+            >
+                <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))',
+                    gap: '12px'
+                }}>
+                    {imageFiles.map((file) => (
+                        <div
+                            key={file.key}
+                            onClick={() => {
+                                const now = Date.now();
+                                // 防止快速连续点击（500ms内只允许一次点击）
+                                if (now - lastClickTimeRef.current < 500) {
+                                    return;
+                                }
+                                lastClickTimeRef.current = now;
+                                onImageSelect(file.filePath!);
+                            }}
+                            style={{
+                                aspectRatio: '1',
+                                borderRadius: '8px',
+                                overflow: 'hidden',
+                                cursor: 'pointer',
+                                border: selectedImage === file.filePath ? '2px solid #1890ff' : '2px solid transparent',
+                                transition: 'all 0.2s ease',
+                                backgroundColor: 'white',
+                                boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+                            }}
+                        >
+                            <img
+                                src={`${IMAGE_BASE_URL}/${file.filePath}`}
+                                alt={file.title}
+                                style={{
+                                    width: '100%',
+                                    height: '100%',
+                                    objectFit: 'cover',
+                                    display: 'block'
+                                }}
+                                onError={(e) => {
+                                    const target = e.target as HTMLImageElement;
+                                    target.style.display = 'none';
+                                    const parent = target.parentElement;
+                                    if (parent) {
+                                        parent.innerHTML = `
+                                            <div style="
+                                                width: 100%;
+                                                height: 100%;
+                                                display: flex;
+                                                flex-direction: column;
+                                                align-items: center;
+                                                justify-content: center;
+                                                background: #f5f5f5;
+                                                color: #999;
+                                                font-size: 12px;
+                                                text-align: center;
+                                                padding: 8px;
+                                            ">
+                                                <div style="font-size: 24px; margin-bottom: 4px;">🖼️</div>
+                                                <div style="word-break: break-all; line-height: 1.2;">${file.title}</div>
+                                            </div>
+                                        `;
+                                    }
+                                }}
+                            />
+                        </div>
+                    ))}
+                </div>
+                {imageFiles.length === 0 && (
+                    <div style={{ textAlign: 'center', color: '#999', padding: '40px' }}>
+                        暂无图片文件
+                    </div>
+                )}
+            </div>
+        );
+    }, (prevProps, nextProps) => {
+        // 自定义比较函数，只有当真正需要的数据变化时才重新渲染
+        return (
+            prevProps.fileTreeData === nextProps.fileTreeData &&
+            prevProps.selectedImage === nextProps.selectedImage &&
+            prevProps.onImageSelect === nextProps.onImageSelect &&
+            prevProps.scrollRef === nextProps.scrollRef &&
+            prevProps.onScroll === nextProps.onScroll
         );
     });
 
@@ -807,13 +1020,6 @@ const CrawlerPage: React.FC = () => {
     };
 
 
-    const formatFileSize = (bytes: number) => {
-        if (bytes === 0) return '0 B';
-        const k = 1024;
-        const sizes = ['B', 'KB', 'MB', 'GB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-    };
 
     // 根据文件扩展名获取图标
     const getFileIcon = (filename: string, isFolder: boolean = false) => {
@@ -881,9 +1087,6 @@ const CrawlerPage: React.FC = () => {
 
     const handleBatchExport = () => {
         try {
-            console.log('导出数据 - 当前结果数量:', results?.length || 0);
-            console.log('导出数据 - 当前结果:', results);
-
             if (!results || results.length === 0) {
                 message.warning('没有数据可导出');
                 return;
@@ -928,7 +1131,6 @@ const CrawlerPage: React.FC = () => {
             URL.revokeObjectURL(link.href);
 
             message.success(`数据导出成功！共导出 ${results.length} 条记录`);
-            console.log('导出完成，文件大小:', blob.size, 'bytes');
         } catch (error) {
             console.error('导出数据失败:', error);
             message.error('导出数据失败');
@@ -936,9 +1138,6 @@ const CrawlerPage: React.FC = () => {
     };
 
     const handleBatchDelete = () => {
-        console.log('批量删除 - 当前结果数量:', results?.length || 0);
-        console.log('批量删除 - 当前结果:', results);
-
         Modal.confirm({
             title: '批量删除确认',
             content: `确定要删除所有 ${results?.length || 0} 张图片吗？此操作不可撤销。`,
@@ -947,10 +1146,8 @@ const CrawlerPage: React.FC = () => {
             okType: 'danger',
             onOk: () => {
                 try {
-                    console.log('执行批量删除...');
                     setResults([]);
                     message.success('所有图片已删除');
-                    console.log('批量删除完成');
                 } catch (error) {
                     console.error('批量删除失败:', error);
                     message.error('批量删除失败');
@@ -1054,17 +1251,9 @@ const CrawlerPage: React.FC = () => {
         try {
             const values = await form.validateFields();
 
-            // 调试：检查数据类型
-            console.log('表单值:', values);
-            console.log('limit类型:', typeof values.limit, '值:', values.limit);
-            console.log('delay类型:', typeof values.delay, '值:', values.delay);
-
             // 确保数据类型正确 - 强制转换为数字
             const limit = parseInt(String(values.limit)) || 100;
             const delay = parseInt(String(values.delay)) || 1;
-
-            console.log('转换后 - limit类型:', typeof limit, '值:', limit);
-            console.log('转换后 - delay类型:', typeof delay, '值:', delay);
 
             // 创建爬虫请求
             const crawlRequest: CrawlRequest = {
@@ -1080,9 +1269,6 @@ const CrawlerPage: React.FC = () => {
                 proxy_url: proxyEnabled ? `http://${proxyUrl}` : undefined,
                 cookie: useCookie ? (useDefaultCookie ? 'default' : pixivCookie) : undefined
             };
-
-            // 调试：打印请求数据
-            console.log('发送的爬虫请求:', crawlRequest);
 
             // 调用API创建任务
             const newTask = await apiService.createCrawlTask(crawlRequest);
@@ -1171,7 +1357,7 @@ const CrawlerPage: React.FC = () => {
                             </Space>
                         }
                         style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
-                        bodyStyle={{ flex: 1, padding: 0, overflow: 'hidden' }}
+                        styles={{ body: { flex: 1, padding: 0, overflow: 'hidden' } }}
                     >
                         <Spin spinning={loading} style={{ height: '100%' }}>
                             <div style={{ height: '100%', overflow: 'auto' }}>
@@ -1193,7 +1379,7 @@ const CrawlerPage: React.FC = () => {
                     <Card
                         title="📊 实时日志"
                         style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
-                        bodyStyle={{ flex: 1, padding: '16px', overflow: 'hidden' }}
+                        styles={{ body: { flex: 1, padding: '16px', overflow: 'hidden' } }}
                     >
                         <div style={{ height: '100%', overflow: 'auto' }}>
                             <Timeline
@@ -1257,21 +1443,68 @@ const CrawlerPage: React.FC = () => {
                         <div style={{
                             border: '1px solid #d9d9d9',
                             borderRadius: '6px',
-                            padding: '8px',
                             height: '500px',
-                            overflow: 'auto',
-                            background: 'linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%)'
+                            background: 'linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%)',
+                            display: 'flex',
+                            flexDirection: 'column'
                         }}>
                             <div style={{
                                 padding: '8px 12px',
                                 background: '#fafafa',
                                 borderBottom: '1px solid #d9d9d9',
                                 fontWeight: 'bold',
-                                fontSize: '14px'
+                                fontSize: '14px',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center'
                             }}>
-                                📁 文件树
+                                <span>📁 文件树</span>
+                                <Space>
+                                    <Button
+                                        size="small"
+                                        icon={<ReloadOutlined />}
+                                        onClick={() => loadFileTree(true)}
+                                        loading={fileTreeLoading}
+                                    >
+                                        刷新
+                                    </Button>
+                                    <Space.Compact size="small">
+                                        <Button
+                                            type={viewMode === 'tree' ? 'primary' : 'default'}
+                                            icon={<FolderOutlined />}
+                                            onClick={() => setViewMode('tree')}
+                                        >
+                                            树形
+                                        </Button>
+                                        <Button
+                                            type={viewMode === 'grid' ? 'primary' : 'default'}
+                                            icon={<FileImageOutlined />}
+                                            onClick={() => setViewMode('grid')}
+                                        >
+                                            平铺
+                                        </Button>
+                                    </Space.Compact>
+                                </Space>
                             </div>
-                            <VirtualFileTree />
+                            {viewMode === 'tree' ? (
+                                <VirtualFileTree
+                                    fileTreeData={fileTreeData}
+                                    expandedKeys={expandedKeys}
+                                    selectedImage={selectedImage}
+                                    onImageSelect={handleImageSelect}
+                                    onToggleExpand={handleToggleExpand}
+                                    scrollRef={fileTreeScrollRef}
+                                    onScroll={handleScroll}
+                                />
+                            ) : (
+                                <GridView
+                                    fileTreeData={fileTreeData}
+                                    selectedImage={selectedImage}
+                                    onImageSelect={handleImageSelect}
+                                    scrollRef={fileTreeScrollRef}
+                                    onScroll={handleScroll}
+                                />
+                            )}
                         </div>
                     </Col>
                     <Col span={16}>
@@ -1308,7 +1541,7 @@ const CrawlerPage: React.FC = () => {
                                         maxHeight: '80%'
                                     }}>
                                         <img
-                                            src={`http://localhost:50052/api/images/${selectedImage}`}
+                                            src={`${IMAGE_BASE_URL}/${selectedImage}`}
                                             alt="预览"
                                             style={{
                                                 maxWidth: '100%',
@@ -1340,7 +1573,7 @@ const CrawlerPage: React.FC = () => {
                                                 }
                                             }}
                                             onClick={() => {
-                                                window.open(`http://localhost:50052/api/images/${selectedImage}`, '_blank');
+                                                window.open(`${IMAGE_BASE_URL}/${selectedImage}`, '_blank');
                                             }}
                                         />
                                     </div>

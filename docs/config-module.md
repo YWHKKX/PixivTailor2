@@ -1,16 +1,18 @@
 # 配置模块文档
 
-配置模块是PixivTailor的统一配置管理模块，负责加载、验证和管理应用程序的所有配置参数，支持多种配置源、动态配置更新和模块化配置管理。
+配置模块是PixivTailor的统一配置管理模块，负责加载、验证和管理应用程序的所有配置参数，支持多种配置源、动态配置更新和模块化配置管理。该模块已完全实现并集成到Web界面中。
 
 ## 📁 模块结构
 
 - **backend/internal/config/**: 配置管理模块目录
 - **config.go**: 配置管理接口实现
 - **modules.go**: 模块配置定义
+- **ai_config.go**: AI模块配置定义
+- **backend/internal/http/generation_config_handler.go**: 配置文件管理API
 
 ## 🔧 核心组件
 
-### 1. 配置管理器
+### 1. 配置管理器 ✅
 
 **功能描述**: 统一管理所有配置，提供配置的加载、保存、验证和监听功能
 
@@ -23,8 +25,10 @@
 - **Set**: 设置配置值
 - **GetModuleConfig**: 获取模块配置
 - **SetModuleConfig**: 设置模块配置
+- **parseModuleConfig**: 解析模块配置
+- **createDefaultConfigUnlocked**: 创建默认配置
 
-### 2. 全局配置结构
+### 2. 全局配置结构 ✅
 
 **功能描述**: 定义应用程序的完整配置结构
 
@@ -34,9 +38,18 @@
 - **用户配置**: 用户个性化设置
 - **元数据**: 配置版本和元信息
 
+### 3. 模块配置工厂 ✅
+
+**功能描述**: 创建和管理不同类型的模块配置
+
+**支持的模块**:
+- **AI模块**: AI生成和训练相关配置
+- **爬虫模块**: Pixiv爬虫相关配置
+- **日志模块**: 日志系统配置
+
 ## 🚀 主要功能
 
-### 1. 配置加载
+### 1. 配置加载 ✅
 
 **功能描述**: 从多种配置源加载配置信息
 
@@ -53,7 +66,7 @@
 - 应用命令行参数覆盖
 - 验证配置有效性
 
-### 2. 配置验证
+### 2. 配置验证 ✅
 
 **功能描述**: 验证配置参数的有效性和完整性
 
@@ -63,7 +76,7 @@
 - **依赖关系**: 检查配置项之间的依赖关系
 - **必需参数**: 验证必需参数是否存在
 
-### 3. 动态配置
+### 3. 动态配置 ✅
 
 **功能描述**: 支持配置的动态更新和热重载
 
@@ -73,7 +86,7 @@
 - **实时更新**: 实时更新配置参数
 - **回滚机制**: 支持配置回滚
 
-### 4. 模块化配置
+### 4. 模块化配置 ✅
 
 **功能描述**: 支持模块化的配置管理
 
@@ -310,14 +323,75 @@
 - **配置合并**: 合并重复的配置项
 - **配置清理**: 清理无用的配置项
 
-## 🔒 安全与合规
+## 🌐 API接口
 
-### 1. 配置安全
-- **敏感信息加密**: 加密存储敏感配置
-- **访问控制**: 限制配置访问权限
-- **配置审计**: 记录配置访问日志
+### HTTP API端点
 
-### 2. 数据保护
-- **配置备份**: 定期备份配置文件
-- **版本控制**: 配置版本管理
-- **回滚机制**: 支持配置回滚
+**配置文件管理**:
+- `GET /api/configs` - 获取配置列表
+- `POST /api/configs/create` - 创建配置
+- `GET /api/configs/categories` - 获取配置分类
+- `GET /api/configs/default` - 获取默认配置
+- `POST /api/configs/default` - 设置默认配置
+- `POST /api/configs/import` - 导入配置
+- `POST /api/configs/export` - 导出配置
+- `POST /api/configs/import-file` - 从文件导入配置
+- `POST /api/configs/load-from-files` - 从文件加载配置
+- `GET /api/configs/name/{name}` - 按名称获取配置
+- `POST /api/configs/{id}/use` - 使用配置
+- `GET /api/configs/{id}` - 获取配置详情
+- `PUT /api/configs/{id}` - 更新配置
+- `DELETE /api/configs/{id}` - 删除配置
+
+**文件系统配置管理**:
+- `POST /api/configs/file/create` - 创建配置文件
+- `PUT /api/configs/file/{id}/update` - 更新配置文件
+- `DELETE /api/configs/file/{id}/delete` - 删除配置文件
+
+**配置管理**:
+- `POST /api/config/get` - 获取配置
+- `POST /api/config/update` - 更新配置
+
+### 配置数据结构
+
+**GenerationConfig配置结构**:
+```json
+{
+  "id": "config_id",
+  "name": "配置名称",
+  "category": "分类",
+  "description": "描述",
+  "model": "模型文件",
+  "loras": [
+    {
+      "path": "lora文件路径",
+      "weight": 0.8
+    }
+  ],
+  "steps": 20,
+  "cfg_scale": 7,
+  "width": 512,
+  "height": 512,
+  "sampler": "采样器",
+  "enable_hr": false,
+  "hr_scale": 2,
+  "hr_steps": 0,
+  "hr_upscaler": "upscaler",
+  "created_at": "2025-01-01T00:00:00Z",
+  "updated_at": "2025-01-01T00:00:00Z"
+}
+```
+
+**API响应结构**:
+```json
+{
+  "status": {
+    "code": 200,
+    "message": "success",
+    "details": "操作成功"
+  },
+  "data": {
+    // 具体数据内容
+  }
+}
+```

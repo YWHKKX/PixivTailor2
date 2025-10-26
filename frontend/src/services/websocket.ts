@@ -1,4 +1,7 @@
-// WebSocket 连接管理器 - 基于 plan.md 设计
+// WebSocket 连接管理器 - 统一管理 WebSocket 连接和消息处理
+import { WS_BASE_URL } from '../config/ports';
+
+// ==================== 类型定义 ====================
 export interface WebSocketMessage {
   type: string;
   task_id?: string;
@@ -10,9 +13,14 @@ export interface TaskUpdate {
   task_id: string;
   status: string;
   progress: number;
-  message: string;
+  message?: string;
   result?: any;
   error?: string;
+  images_found?: number;
+  images_downloaded?: number;
+  images_generated?: number;
+  images_success?: number;
+  time?: string;
 }
 
 export interface ProgressUpdate {
@@ -28,6 +36,30 @@ export interface StatusUpdate {
   message: string;
 }
 
+export interface WebUIStatusUpdate {
+  status: string;
+  port_open: boolean;
+  api_responding: boolean;
+  process_id: boolean;
+  managed: boolean;
+}
+
+export interface GlobalLogMessage {
+  level: string;
+  message: string;
+  timestamp: string;
+  source?: string;
+}
+
+export interface TaskLogMessage {
+  task_id: string;
+  level: string;
+  message: string;
+  timestamp: string;
+  source?: string;
+}
+
+// ==================== WebSocket 管理器类 ====================
 class WebSocketManager {
   private connection: WebSocket | null = null;
   private reconnectAttempts = 0;
@@ -42,7 +74,7 @@ class WebSocketManager {
   private connectionId: string = '';
   private connectTimer: NodeJS.Timeout | null = null;
 
-  // 连接 WebSocket
+  // ==================== 连接管理 ====================
   connect(url: string): void {
     // 清除之前的连接定时器
     if (this.connectTimer) {
@@ -50,156 +82,150 @@ class WebSocketManager {
       this.connectTimer = null;
     }
 
-    // 如果已有连接且状态正常，跳过重复连接
-    if (this.connection && this.isConnected) {
-      console.log('WebSocket 已连接，跳过重复连接');
-      return;
-    }
-
-    // 如果正在连接中，跳过重复连接
+    // 如果已经在连接中，直接返回
     if (this.isConnecting) {
       console.log('WebSocket 正在连接中，跳过重复连接');
       return;
     }
 
-    // 如果已有连接，先关闭
-    if (this.connection) {
-      this.connection.close();
-      this.connection = null;
+    // 如果已经连接，先断开
+    if (this.connection && this.connection.readyState === WebSocket.OPEN) {
+      console.log('WebSocket 已连接，先断开旧连接');
+      this.disconnect();
     }
 
     this.url = url;
+    this.isConnecting = true;
+    this.connectionId = `ws_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
-    // 添加防抖延迟，避免频繁连接
-    this.connectTimer = setTimeout(() => {
-      this.isConnecting = true;
-      
-      try {
-        // 生成连接ID用于去重
-        this.connectionId = `ws_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        console.log(`WebSocket 连接尝试 ${this.connectionId}`);
-        
-        this.connection = new WebSocket(url);
-        this.setupEventHandlers();
-      } catch (error) {
-        console.error('WebSocket连接失败:', error);
-        this.isConnecting = false;
-      }
-    }, 500); // 500ms防抖延迟
+    console.log(`WebSocket 连接尝试 ${this.connectionId}`);
+
+    try {
+      this.connection = new WebSocket(url);
+      this.setupEventHandlers();
+    } catch (error) {
+      console.error('WebSocket 连接失败:', error);
+      this.isConnecting = false;
+      this.scheduleReconnect();
+    }
   }
 
-  // 设置事件处理器
   private setupEventHandlers(): void {
     if (!this.connection) return;
 
-    this.connection.onopen = (event) => {
+    this.connection.onopen = () => {
       console.log(`WebSocket连接已建立 ${this.connectionId}`);
       this.isConnected = true;
       this.isConnecting = false;
       this.reconnectAttempts = 0;
       this.startHeartbeat();
-      this.emit('connected', event);
+      this.emit('connected', { connectionId: this.connectionId });
     };
 
     this.connection.onmessage = (event) => {
       try {
-        const data: WebSocketMessage = JSON.parse(event.data);
-        this.handleMessage(data);
+        const message: WebSocketMessage = JSON.parse(event.data);
+        this.handleMessage(message);
       } catch (error) {
-        console.error('消息解析失败:', error);
+        console.error('WebSocket 消息解析失败:', error);
       }
     };
 
     this.connection.onclose = (event) => {
-      console.log(`WebSocket连接已关闭 ${this.connectionId}:`, event.code, event.reason);
+      console.log(`WebSocket连接已关闭 ${this.connectionId}: ${event.code}`);
       this.isConnected = false;
       this.isConnecting = false;
       this.stopHeartbeat();
-      this.emit('disconnected', event);
-      
-      // 只有在非正常关闭时才重连
-      if (event.code !== 1000) { // 1000 是正常关闭
+      this.emit('disconnected', { code: event.code, reason: event.reason });
+
+      // 如果不是正常关闭，启动重连
+      if (event.code !== 1000) {
         console.log('WebSocket异常关闭，启动重连机制');
-        this.handleReconnect();
-      } else {
-        console.log('WebSocket正常关闭，不进行重连');
+        this.scheduleReconnect();
       }
     };
 
     this.connection.onerror = (error) => {
       console.error('WebSocket错误:', error);
+      this.isConnecting = false;
       this.emit('error', error);
     };
   }
 
-  // 处理消息
-  private handleMessage(data: WebSocketMessage): void {
-    const { type, data: payload } = data;
-    const message = (data as any).message;
+  private handleMessage(message: WebSocketMessage): void {
+    console.log('WebSocket 收到消息:', message);
 
-    switch (type) {
+    switch (message.type) {
       case 'welcome':
-        console.log('WebSocket 欢迎消息:', message);
+        console.log('WebSocket 欢迎消息:', message.message || message.data);
+        this.emit('welcome', message);
         break;
       case 'task_update':
-        this.emit('taskUpdate', payload);
+        this.emit('task_update', message.data as TaskUpdate);
         break;
       case 'progress_update':
-        this.emit('progressUpdate', payload);
+        this.emit('progress_update', message.data as ProgressUpdate);
         break;
       case 'status_update':
-        this.emit('statusUpdate', payload);
+        this.emit('status_update', message.data as StatusUpdate);
         break;
-      case 'error':
-        this.emit('error', payload);
+      case 'webui_status':
+        this.emit('webui_status', message.data as WebUIStatusUpdate);
         break;
-      case 'pong':
-        // 心跳响应
-        if (this.heartbeatTimeout) {
-          clearTimeout(this.heartbeatTimeout);
-          this.heartbeatTimeout = null;
-        }
-        break;
-      case 'log_message':
-        this.emit('logMessage', data);
+      case 'system_status':
+        this.emit('system_status', message.data);
         break;
       case 'global_log':
-        this.emit('logMessage', data);
+        this.emit('global_log', message.data as GlobalLogMessage);
+        break;
+      case 'log_message':
+        this.emit('log_message', message.data as TaskLogMessage);
+        break;
+      case 'error':
+        console.error('WebSocket 服务器错误:', message.data);
+        this.emit('error', message.data);
         break;
       default:
-        console.log('未知消息类型:', type);
+        console.log('WebSocket 未知消息类型:', message.type);
+        this.emit('message', message);
     }
   }
 
-  // 发送消息
-  send(data: WebSocketMessage): boolean {
-    if (this.connection && this.isConnected) {
-      try {
-        this.connection.send(JSON.stringify(data));
-        return true;
-      } catch (error) {
-        console.error('发送消息失败:', error);
-        return false;
+  // ==================== 重连机制 ====================
+  private scheduleReconnect(): void {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('WebSocket 重连次数已达上限，停止重连');
+      this.emit('max_reconnect_attempts_reached');
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+    
+    console.log(`WebSocket重连尝试 ${this.reconnectAttempts}/${this.maxReconnectAttempts}，${delay}ms后重试`);
+    
+    this.connectTimer = setTimeout(() => {
+      if (!this.isConnected && !this.isConnecting) {
+        this.connect(this.url);
       }
-    }
-    return false;
+    }, delay);
   }
 
-  // 心跳机制
+  // ==================== 心跳机制 ====================
   private startHeartbeat(): void {
+    this.stopHeartbeat();
+    
     this.heartbeatInterval = setInterval(() => {
-      if (this.isConnected) {
+      if (this.connection && this.connection.readyState === WebSocket.OPEN) {
         this.send({ type: 'ping' });
         
         // 设置心跳超时
         this.heartbeatTimeout = setTimeout(() => {
-          console.warn('心跳超时，重新连接...');
-          if (this.connection) {
-            this.connection.close();
-          }
-        }, 5000);
+          console.warn('WebSocket 心跳超时，断开连接');
+          this.disconnect();
+        }, 10000);
       }
-    }, 30000); // 30秒发送一次心跳
+    }, 30000);
   }
 
   private stopHeartbeat(): void {
@@ -213,38 +239,23 @@ class WebSocketManager {
     }
   }
 
-  // 重连机制
-  private handleReconnect(): void {
-    // 如果正在连接中，不重复重连
-    if (this.isConnecting) {
-      console.log('WebSocket正在连接中，跳过重连');
-      return;
+  // ==================== 消息发送 ====================
+  send(message: WebSocketMessage): boolean {
+    if (!this.connection || this.connection.readyState !== WebSocket.OPEN) {
+      console.warn('WebSocket 未连接，无法发送消息');
+      return false;
     }
 
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++;
-      const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 10000); // 最大延迟10秒
-      
-      console.log(`WebSocket重连尝试 ${this.reconnectAttempts}/${this.maxReconnectAttempts}，${delay}ms后重试`);
-      
-      setTimeout(() => {
-        if (!this.isConnected && !this.isConnecting) {
-          this.connect(this.url);
-        }
-      }, delay);
-    } else {
-      console.error('WebSocket重连失败，已达到最大重试次数');
-      this.emit('reconnectFailed');
-      
-      // 重置重连计数，允许后续重连
-      setTimeout(() => {
-        this.reconnectAttempts = 0;
-        console.log('WebSocket重连计数已重置，可以重新尝试连接');
-      }, 30000); // 30秒后重置
+    try {
+      this.connection.send(JSON.stringify(message));
+      return true;
+    } catch (error) {
+      console.error('WebSocket 发送消息失败:', error);
+      return false;
     }
   }
 
-  // 事件系统
+  // ==================== 事件管理 ====================
   on(event: string, handler: Function): void {
     if (!this.eventHandlers.has(event)) {
       this.eventHandlers.set(event, []);
@@ -253,8 +264,8 @@ class WebSocketManager {
   }
 
   off(event: string, handler: Function): void {
-    if (this.eventHandlers.has(event)) {
-      const handlers = this.eventHandlers.get(event)!;
+    const handlers = this.eventHandlers.get(event);
+    if (handlers) {
       const index = handlers.indexOf(handler);
       if (index > -1) {
         handlers.splice(index, 1);
@@ -263,70 +274,92 @@ class WebSocketManager {
   }
 
   private emit(event: string, data?: any): void {
-    if (this.eventHandlers.has(event)) {
-      this.eventHandlers.get(event)!.forEach(handler => handler(data));
+    const handlers = this.eventHandlers.get(event);
+    if (handlers) {
+      handlers.forEach(handler => {
+        try {
+          handler(data);
+        } catch (error) {
+          console.error(`WebSocket 事件处理器错误 (${event}):`, error);
+        }
+      });
     }
   }
 
-  // 关闭连接
-  close(): void {
+  // ==================== 连接控制 ====================
+  disconnect(): void {
     this.stopHeartbeat();
-    this.isConnecting = false;
-    this.isConnected = false;
     
-    // 清理连接定时器
     if (this.connectTimer) {
       clearTimeout(this.connectTimer);
       this.connectTimer = null;
     }
-    
+
     if (this.connection) {
-      this.connection.close();
+      this.connection.close(1000, '主动断开');
       this.connection = null;
     }
+
+    this.isConnected = false;
+    this.isConnecting = false;
+    this.reconnectAttempts = 0;
   }
 
-  // 手动重连
   reconnect(): void {
-    console.log('手动触发WebSocket重连');
-    this.reconnectAttempts = 0;
     if (this.url) {
+      console.log('WebSocket 手动重连');
+      this.disconnect();
       this.connect(this.url);
+    } else {
+      console.warn('WebSocket 重连失败：没有保存的连接URL');
     }
   }
 
-  // 获取连接状态
-  getConnectionStatus(): { isConnected: boolean; isConnecting: boolean; reconnectAttempts: number } {
+  // ==================== 状态查询 ====================
+  isWebSocketConnected(): boolean {
+    return this.isConnected && this.connection?.readyState === WebSocket.OPEN;
+  }
+
+  getConnectionStatus(): { isConnected: boolean; isConnecting: boolean; readyState: number } {
     return {
       isConnected: this.isConnected,
       isConnecting: this.isConnecting,
-      reconnectAttempts: this.reconnectAttempts
+      readyState: this.connection?.readyState || WebSocket.CLOSED
     };
   }
-}
 
-// 全局 WebSocket 管理器实例
-export const wsManager = new WebSocketManager();
-
-// 初始化连接
-export const initWebSocket = (): void => {
-  const wsUrl = 'ws://localhost:50052/ws';
-  const isDevelopment = import.meta.env.DEV;
-  
-  if (isDevelopment) {
-    console.log('开发模式：WebSocket连接已初始化');
+  getConnectionId(): string {
+    return this.connectionId;
   }
-  
-  wsManager.connect(wsUrl);
-};
 
-// 页面卸载时清理连接
-if (typeof window !== 'undefined') {
-  window.addEventListener('beforeunload', () => {
-    console.log('页面即将卸载，清理 WebSocket 连接');
-    wsManager.close();
-  });
+  getReconnectAttempts(): number {
+    return this.reconnectAttempts;
+  }
+
+  // ==================== 工具方法 ====================
+  requestTaskUpdate(taskId: string): void {
+    this.send({
+      type: 'get_task_status',
+      task_id: taskId,
+      timestamp: Date.now()
+    });
+  }
+
+  requestSystemStatus(): void {
+    this.send({
+      type: 'get_system_status',
+      timestamp: Date.now()
+    });
+  }
+
+  requestWebUIStatus(): void {
+    this.send({
+      type: 'get_webui_status',
+      timestamp: Date.now()
+    });
+  }
 }
 
-// 导出供其他模块使用
+// ==================== 导出单例 ====================
+export const wsManager = new WebSocketManager();
 export default wsManager;

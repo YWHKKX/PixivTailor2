@@ -49,27 +49,39 @@
             "enabled": true,
             "stable_diffusion": {
                 "api_url": "http://127.0.0.1:7860/sdapi/v1",
-                "timeout": 30,
+                "timeout": 0,
                 "retry_count": 2,
                 "default_model": "test_model.safetensors",
                 "default_sampler": "DPM++ 2M Karras",
-                "default_steps": 10,
+                "default_steps": 20,
                 "default_cfg": 7.0,
-                "default_width": 256,
-                "default_height": 256,
-                "max_batch_size": 2,
+                "default_width": 512,
+                "default_height": 512,
+                "max_batch_size": 4,
                 "max_steps": 50,
                 "max_cfg": 20.0,
                 "max_width": 1024,
                 "max_height": 1024,
                 "models": [
-                    "test_model.safetensors"
+                    "test_model.safetensors",
+                    "anime_model.safetensors"
                 ],
                 "samplers": [
                     "DPM++ 2M Karras",
-                    "Euler a"
+                    "Euler a",
+                    "DDIM"
                 ],
-                "options": {}
+                "lora_models": [
+                    {
+                        "name": "test_lora",
+                        "path": "test_lora.safetensors",
+                        "weight": 0.8
+                    }
+                ],
+                "options": {
+                    "send_images": true,
+                    "save_images": true
+                }
             },
             "kohya_ss": {
                 "api_url": "http://127.0.0.1:7860",
@@ -259,6 +271,49 @@
             "retry_count": 2,
             "retry_delay": 1,
             "max_workers": 2
+        }
+    },
+    "ai_generation_configs": {
+        "test_anime_config": {
+            "name": "测试动漫配置",
+            "category": "动漫",
+            "description": "用于测试的动漫风格配置",
+            "model": "test_model.safetensors",
+            "lora": [
+                {
+                    "path": "test_lora.safetensors",
+                    "weight": 0.8
+                }
+            ],
+            "params": {
+                "steps": 20,
+                "cfg_scale": 7,
+                "width": 512,
+                "height": 512,
+                "sampler": "DPM++ 2M Karras",
+                "enable_hr": false,
+                "hr_scale": 2,
+                "hr_steps": 10,
+                "hr_sampler": "DPM++ 2M Karras"
+            }
+        },
+        "test_realistic_config": {
+            "name": "测试写实配置",
+            "category": "写实",
+            "description": "用于测试的写实风格配置",
+            "model": "realistic_model.safetensors",
+            "lora": [],
+            "params": {
+                "steps": 25,
+                "cfg_scale": 8,
+                "width": 768,
+                "height": 768,
+                "sampler": "Euler a",
+                "enable_hr": true,
+                "hr_scale": 1.5,
+                "hr_steps": 15,
+                "hr_sampler": "Euler a"
+            }
         }
     },
     "user": {
