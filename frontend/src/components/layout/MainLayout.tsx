@@ -4,6 +4,7 @@ import {
     HomeOutlined,
     RobotOutlined,
     DatabaseOutlined,
+    TagsOutlined,
     HistoryOutlined,
     FileTextOutlined,
     UserOutlined,
@@ -64,6 +65,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             key: '/crawler',
             icon: <DatabaseOutlined />,
             label: '爬虫管理',
+        },
+        {
+            key: '/tagger',
+            icon: <TagsOutlined />,
+            label: '图像标签',
         },
         {
             key: '/history',

@@ -24,7 +24,8 @@ import {
     EditOutlined,
     EyeOutlined,
     SearchOutlined,
-    ImportOutlined
+    ImportOutlined,
+    DeleteOutlined
 } from '@ant-design/icons';
 import { apiService } from '../services/api';
 
@@ -53,13 +54,28 @@ interface GenerationConfig {
     updated_at: string;
 }
 
+interface CharacterProfile {
+    id: number;
+    name: string;
+    description: string;
+    tags: string[];
+    tag_weights: Record<string, number>;
+    created_at: string;
+    updated_at: string;
+}
+
 const ConfigManagerPage: React.FC = () => {
+    const [activeTab, setActiveTab] = useState<'configs' | 'characters'>('configs');
     const [configs, setConfigs] = useState<GenerationConfig[]>([]);
+    const [characters, setCharacters] = useState<CharacterProfile[]>([]);
     const [loading, setLoading] = useState(false);
     const [selectedConfig, setSelectedConfig] = useState<GenerationConfig | null>(null);
+    const [selectedCharacter, setSelectedCharacter] = useState<CharacterProfile | null>(null);
     const [modalVisible, setModalVisible] = useState(false);
     const [drawerVisible, setDrawerVisible] = useState(false);
     const [editingConfig, setEditingConfig] = useState<GenerationConfig | null>(null);
+    const [editingCharacter, setEditingCharacter] = useState<CharacterProfile | null>(null);
+    const [characterEditModalVisible, setCharacterEditModalVisible] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedCategory, setSelectedCategory] = useState('');
     const [categories, setCategories] = useState<string[]>([]);
@@ -107,9 +123,23 @@ const ConfigManagerPage: React.FC = () => {
         }
     };
 
+    const loadCharacters = async () => {
+        setLoading(true);
+        try {
+            const charactersList = await apiService.listCharacterProfiles();
+            setCharacters(charactersList);
+        } catch (error) {
+            console.error('加载角色配置失败:', error);
+            message.error('加载角色配置失败');
+        } finally {
+            setLoading(false);
+        }
+    };
+
     useEffect(() => {
         loadConfigs();
         loadCategories();
+        loadCharacters();
     }, []);
 
     // 搜索
@@ -329,6 +359,19 @@ const ConfigManagerPage: React.FC = () => {
                         <Title level={3}>配置文件管理</Title>
                     </Col>
                     <Col>
+                        <Select value={activeTab} onChange={(value) => {
+                            setActiveTab(value);
+                            if (value === 'configs') {
+                                loadConfigs();
+                            } else {
+                                loadCharacters();
+                            }
+                        }} style={{ width: 200 }}>
+                            <Option value="configs">生成配置 (configs/)</Option>
+                            <Option value="characters">角色特征 (characters/)</Option>
+                        </Select>
+                    </Col>
+                    <Col>
                         <Space>
                             <Upload
                                 accept=".json"
@@ -375,18 +418,116 @@ const ConfigManagerPage: React.FC = () => {
                     </Col>
                 </Row>
 
-                <Table
-                    columns={columns}
-                    dataSource={configs}
-                    loading={loading}
-                    rowKey="id"
-                    pagination={{
-                        ...pagination,
-                        onChange: (page, pageSize) => {
-                            loadConfigs(page, pageSize || 10, searchQuery, selectedCategory);
-                        }
-                    }}
-                />
+                {activeTab === 'configs' && (
+                    <Table
+                        columns={columns}
+                        dataSource={configs}
+                        loading={loading}
+                        rowKey="id"
+                        pagination={{
+                            ...pagination,
+                            onChange: (page, pageSize) => {
+                                loadConfigs(page, pageSize || 10, searchQuery, selectedCategory);
+                            }
+                        }}
+                    />
+                )}
+
+                {activeTab === 'characters' && (
+                    <Table
+                        columns={[
+                            {
+                                title: '角色名称',
+                                dataIndex: 'name',
+                                key: 'name',
+                                width: 150,
+                                render: (text: string) => (
+                                    <Text strong>{text}</Text>
+                                ),
+                            },
+                            {
+                                title: '描述',
+                                dataIndex: 'description',
+                                key: 'description',
+                                width: 200,
+                                render: (description: string) => (
+                                    <Paragraph
+                                        ellipsis={{ rows: 2, expandable: false, symbol: '...' }}
+                                        style={{ margin: 0, fontSize: 12 }}
+                                    >
+                                        {description || '无描述'}
+                                    </Paragraph>
+                                ),
+                            },
+                            {
+                                title: '标签数量',
+                                dataIndex: 'tags',
+                                key: 'tags',
+                                width: 100,
+                                render: (tags: string[]) => (
+                                    <Text>{tags?.length || 0}</Text>
+                                ),
+                            },
+                            {
+                                title: '更新时间',
+                                dataIndex: 'updated_at',
+                                key: 'updated_at',
+                                width: 150,
+                                render: (updatedAt: string) => (
+                                    updatedAt ? new Date(updatedAt).toLocaleString('zh-CN', {
+                                        year: 'numeric',
+                                        month: '2-digit',
+                                        day: '2-digit',
+                                        hour: '2-digit',
+                                        minute: '2-digit'
+                                    }) : '未知'
+                                ),
+                            },
+                            {
+                                title: '操作',
+                                key: 'actions',
+                                width: 200,
+                                render: (_: any, record: CharacterProfile) => (
+                                    <Space>
+                                        <Tooltip title="查看详情">
+                                            <Button icon={<EyeOutlined />} onClick={() => {
+                                                setSelectedCharacter(record);
+                                                setDrawerVisible(true);
+                                            }} />
+                                        </Tooltip>
+                                        <Tooltip title="编辑">
+                                            <Button icon={<EditOutlined />} onClick={() => {
+                                                setEditingCharacter(record);
+                                                setCharacterEditModalVisible(true);
+                                            }} />
+                                        </Tooltip>
+                                        <Tooltip title="删除">
+                                            <Button danger icon={<DeleteOutlined />} onClick={async () => {
+                                                Modal.confirm({
+                                                    title: '确认删除',
+                                                    content: `确定要删除角色"${record.name}"吗？此操作不可恢复。`,
+                                                    onOk: async () => {
+                                                        try {
+                                                            await apiService.deleteCharacterProfile(record.name);
+                                                            message.success('删除成功');
+                                                            loadCharacters();
+                                                        } catch (error) {
+                                                            message.error('删除失败');
+                                                        }
+                                                    }
+                                                });
+                                            }} />
+                                        </Tooltip>
+                                    </Space>
+                                )
+                            }
+                        ]}
+                        dataSource={characters}
+                        loading={loading}
+                        rowKey="id"
+                        pagination={false}
+                    />
+                )}
             </Card>
 
             {/* 创建/编辑配置模态框 */}
@@ -554,63 +695,209 @@ const ConfigManagerPage: React.FC = () => {
                 </Form>
             </Modal>
 
-            {/* 查看配置抽屉 */}
+            {/* 查看配置/角色抽屉 */}
             <Drawer
-                title="配置详情"
+                title={selectedConfig ? "配置详情" : "角色特征详情"}
                 placement="right"
                 width={600}
                 open={drawerVisible}
-                onClose={() => setDrawerVisible(false)}
+                onClose={() => {
+                    setDrawerVisible(false);
+                    setSelectedConfig(null);
+                    setSelectedCharacter(null);
+                }}
             >
-                {selectedConfig && (
+                {(selectedConfig || selectedCharacter) && (
                     <div>
-                        <Title level={4}>{selectedConfig.name}</Title>
-                        <Text type="secondary">{selectedConfig.description}</Text>
+                        {selectedConfig && (
+                            <>
+                                <Title level={4}>{selectedConfig.name}</Title>
+                                <Text type="secondary">{selectedConfig.description || '无描述'}</Text>
 
-                        <Divider />
+                                <Divider />
 
-                        <Space direction="vertical" style={{ width: '100%' }}>
-                            <div>
-                                <Text strong>分类: </Text>
-                                <Tag>{selectedConfig.category}</Tag>
-                            </div>
+                                <Space direction="vertical" style={{ width: '100%' }}>
+                                    <div>
+                                        <Text strong>分类: </Text>
+                                        <Tag>{selectedConfig.category}</Tag>
+                                    </div>
 
-                            <div>
-                                <Text strong>提示词: </Text>
-                                <Text code>{selectedConfig.prompt}</Text>
-                            </div>
+                                    <div>
+                                        <Text strong>提示词: </Text>
+                                        <Text code>{selectedConfig.prompt}</Text>
+                                    </div>
 
-                            <div>
-                                <Text strong>负面提示词: </Text>
-                                <Text code>{selectedConfig.negative_prompt}</Text>
-                            </div>
+                                    <div>
+                                        <Text strong>负面提示词: </Text>
+                                        <Text code>{selectedConfig.negative_prompt}</Text>
+                                    </div>
 
-                            <div>
-                                <Text strong>参数: </Text>
-                                <Space direction="vertical" size={0}>
-                                    <Text>尺寸: {selectedConfig.width} × {selectedConfig.height}</Text>
-                                    <Text>步数: {selectedConfig.steps}, CFG: {selectedConfig.cfg_scale}</Text>
-                                    <Text>模型: {selectedConfig.model}</Text>
-                                    <Text>采样器: {selectedConfig.sampler}</Text>
-                                    <Text>批次大小: {selectedConfig.batch_size}</Text>
-                                    <Text>高分辨率修复: {selectedConfig.enable_hr ? '是' : '否'}</Text>
-                                    <Text>随机种子: {selectedConfig.seed === -1 ? '随机' : selectedConfig.seed}</Text>
+                                    <div>
+                                        <Text strong>参数: </Text>
+                                        <Space direction="vertical" size={0}>
+                                            <Text>尺寸: {selectedConfig.width} × {selectedConfig.height}</Text>
+                                            <Text>步数: {selectedConfig.steps}, CFG: {selectedConfig.cfg_scale}</Text>
+                                            <Text>模型: {selectedConfig.model}</Text>
+                                            <Text>采样器: {selectedConfig.sampler}</Text>
+                                            <Text>批次大小: {selectedConfig.batch_size}</Text>
+                                            <Text>高分辨率修复: {selectedConfig.enable_hr ? '是' : '否'}</Text>
+                                            <Text>随机种子: {selectedConfig.seed === -1 ? '随机' : selectedConfig.seed}</Text>
+                                        </Space>
+                                    </div>
+
+                                    <div>
+                                        <Text strong>创建时间: </Text>
+                                        <Text>{selectedConfig.created_at ? new Date(selectedConfig.created_at).toLocaleString('zh-CN') : '未知'}</Text>
+                                    </div>
+
+                                    <div>
+                                        <Text strong>更新时间: </Text>
+                                        <Text>{selectedConfig.updated_at ? new Date(selectedConfig.updated_at).toLocaleString('zh-CN') : '未知'}</Text>
+                                    </div>
                                 </Space>
-                            </div>
+                            </>
+                        )}
 
-                            <div>
-                                <Text strong>创建时间: </Text>
-                                <Text>{new Date(selectedConfig.created_at).toLocaleString()}</Text>
-                            </div>
+                        {selectedCharacter && (
+                            <>
+                                <Title level={4}>{selectedCharacter.name}</Title>
+                                <Text type="secondary">{selectedCharacter.description || '无描述'}</Text>
 
-                            <div>
-                                <Text strong>更新时间: </Text>
-                                <Text>{new Date(selectedConfig.updated_at).toLocaleString()}</Text>
-                            </div>
-                        </Space>
+                                <Divider />
+
+                                <Space direction="vertical" style={{ width: '100%' }}>
+                                    <div>
+                                        <Text strong>标签 ({selectedCharacter.tags?.length || 0}): </Text>
+                                        <div style={{ marginTop: 8, maxHeight: 400, overflow: 'auto' }}>
+                                            {selectedCharacter.tags?.map((tag, index) => {
+                                                const weight = selectedCharacter.tag_weights?.[tag] || 0;
+                                                return (
+                                                    <Tag
+                                                        key={index}
+                                                        color={weight > 0.7 ? 'red' : weight > 0.4 ? 'orange' : 'default'}
+                                                        style={{ marginBottom: 8 }}
+                                                    >
+                                                        {tag} ({weight.toFixed(2)})
+                                                    </Tag>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+
+                                    <Divider />
+
+                                    <div>
+                                        <Text strong>创建时间: </Text>
+                                        <Text>{selectedCharacter.created_at ? new Date(selectedCharacter.created_at).toLocaleString('zh-CN') : '未知'}</Text>
+                                    </div>
+
+                                    <div>
+                                        <Text strong>更新时间: </Text>
+                                        <Text>{selectedCharacter.updated_at ? new Date(selectedCharacter.updated_at).toLocaleString('zh-CN') : '未知'}</Text>
+                                    </div>
+                                </Space>
+                            </>
+                        )}
                     </div>
                 )}
             </Drawer>
+
+            {/* 角色编辑模态框 */}
+            <Modal
+                title="编辑角色特征"
+                open={characterEditModalVisible}
+                onCancel={() => {
+                    setCharacterEditModalVisible(false);
+                    setEditingCharacter(null);
+                }}
+                onOk={async () => {
+                    if (!editingCharacter) return;
+                    try {
+                        await apiService.updateCharacterProfile({
+                            name: editingCharacter.name,
+                            description: editingCharacter.description,
+                            tags: editingCharacter.tags,
+                            tag_weights: editingCharacter.tag_weights
+                        });
+                        message.success('更新成功');
+                        setCharacterEditModalVisible(false);
+                        setEditingCharacter(null);
+                        loadCharacters();
+                    } catch (error) {
+                        message.error('更新失败');
+                    }
+                }}
+                okText="保存"
+                cancelText="取消"
+                width={800}
+            >
+                {editingCharacter && (
+                    <Space direction="vertical" style={{ width: '100%' }} size="large">
+                        <div>
+                            <Text strong>角色名称：</Text>
+                            <Input
+                                value={editingCharacter.name}
+                                readOnly
+                                disabled
+                                style={{ marginTop: 8 }}
+                            />
+                            <Text type="secondary" style={{ fontSize: 12 }}>角色名称不能修改</Text>
+                        </div>
+
+                        <div>
+                            <Text strong>角色描述：</Text>
+                            <TextArea
+                                rows={3}
+                                value={editingCharacter.description || ''}
+                                onChange={(e) => {
+                                    setEditingCharacter({
+                                        ...editingCharacter,
+                                        description: e.target.value
+                                    });
+                                }}
+                                placeholder="请输入角色描述（选填）"
+                                style={{ marginTop: 8 }}
+                            />
+                        </div>
+
+                        <div>
+                            <Text strong>特征标签（{editingCharacter.tags?.length || 0}个）：</Text>
+                            <div style={{ marginTop: 8, maxHeight: 400, overflow: 'auto', padding: '12px', border: '1px solid #d9d9d9', borderRadius: '4px', backgroundColor: '#fafafa' }}>
+                                {editingCharacter.tags && editingCharacter.tags.length > 0 ? (
+                                    editingCharacter.tags.map((tag, index) => {
+                                        const weight = editingCharacter.tag_weights?.[tag] || 0;
+                                        return (
+                                            <Tag
+                                                key={index}
+                                                closable
+                                                onClose={() => {
+                                                    const newTags = editingCharacter.tags.filter(t => t !== tag);
+                                                    const newWeights = { ...editingCharacter.tag_weights };
+                                                    delete newWeights[tag];
+                                                    setEditingCharacter({
+                                                        ...editingCharacter,
+                                                        tags: newTags,
+                                                        tag_weights: newWeights
+                                                    });
+                                                }}
+                                                color={weight > 0.7 ? 'red' : weight > 0.4 ? 'orange' : 'default'}
+                                                style={{ marginBottom: 8, marginRight: 8 }}
+                                            >
+                                                {tag} ({weight.toFixed(2)})
+                                            </Tag>
+                                        );
+                                    })
+                                ) : (
+                                    <Text type="secondary">暂无标签</Text>
+                                )}
+                            </div>
+                            <Text type="secondary" style={{ fontSize: 12, marginTop: 4 }}>
+                                提示：红色标签表示高权重（&gt;0.7），橙色表示中权重（&gt;0.4），灰色表示低权重
+                            </Text>
+                        </div>
+                    </Space>
+                )}
+            </Modal>
         </div>
     );
 };

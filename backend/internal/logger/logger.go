@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -8,6 +9,31 @@ import (
 
 	"github.com/sirupsen/logrus"
 )
+
+// CustomFormatter 自定义日志格式化器
+type CustomFormatter struct{}
+
+// Format 实现 logrus.Formatter 接口
+func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	levelStr := "info"
+	switch entry.Level {
+	case logrus.DebugLevel:
+		levelStr = "debug"
+	case logrus.InfoLevel:
+		levelStr = "info"
+	case logrus.WarnLevel:
+		levelStr = "warning"
+	case logrus.ErrorLevel:
+		levelStr = "error"
+	case logrus.FatalLevel:
+		levelStr = "fatal"
+	}
+
+	timestamp := entry.Time.Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf("[%s][%s]: %s", timestamp, levelStr, entry.Message)
+
+	return []byte(msg + "\n"), nil
+}
 
 // LogLevel 日志级别
 type LogLevel int
@@ -30,11 +56,7 @@ func ensureLogger() {
 	if logger == nil {
 		logger = logrus.New()
 		logger.SetLevel(logrus.InfoLevel)
-		logger.SetFormatter(&logrus.TextFormatter{
-			FullTimestamp:   true,
-			TimestampFormat: "2006-01-02 15:04:05",
-			DisableColors:   false,
-		})
+		logger.SetFormatter(&CustomFormatter{})
 		logger.SetOutput(os.Stdout)
 	}
 }
@@ -52,12 +74,8 @@ func Init(verbose bool) {
 		level = InfoLevel
 	}
 
-	// 设置日志格式
-	logger.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp:   true,
-		TimestampFormat: "2006-01-02 15:04:05",
-		DisableColors:   false,
-	})
+	// 设置自定义日志格式
+	logger.SetFormatter(&CustomFormatter{})
 
 	// 设置输出
 	logger.SetOutput(os.Stdout)

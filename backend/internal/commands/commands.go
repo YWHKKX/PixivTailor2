@@ -368,11 +368,11 @@ func CrawlAction(ctx *cli.Context) error {
 	} else if illustID > 0 {
 		// 按插画ID爬取
 		logger.Infof("开始按插画ID爬取: %d", illustID)
-		image, err := crawlerInstance.CrawlByIllust(illustID)
+		illustImages, err := crawlerInstance.CrawlByIllust(illustID)
 		if err != nil {
 			return fmt.Errorf("按插画ID爬取失败: %v", err)
 		}
-		images = []*models.PixivImage{image}
+		images = illustImages
 	} else {
 		return fmt.Errorf("请指定查询参数、用户ID或插画ID")
 	}

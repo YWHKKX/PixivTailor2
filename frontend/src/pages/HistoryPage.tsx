@@ -73,10 +73,19 @@ const HistoryPage: React.FC = () => {
             const tasks = await apiService.getTasks(); // 获取任务列表
 
             // 转换任务数据为历史记录格式
+            // 将任务类型转换为中文
+            const typeMap: { [key: string]: string } = {
+                'crawl': '爬取',
+                'tag': '标签',
+                'generate': '生成',
+                'train': '训练',
+                'classify': '分类'
+            };
+
             const historyItems: HistoryItem[] = tasks.map(task => ({
                 id: task.id.toString(),
                 type: task.type as any,
-                title: task.name || `${task.type}任务`,
+                title: task.name || `${typeMap[task.type] || task.type}任务`,
                 description: `任务ID: ${task.id}`,
                 status: task.status as any,
                 createdAt: new Date(task.created_at).toLocaleString(),

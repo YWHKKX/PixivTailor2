@@ -61,6 +61,33 @@ export interface ConfigItem {
   updated_at: string;
 }
 
+// 标签相关接口
+export interface TagRequest {
+  input_dir: string | string[]; // 支持单个路径或多个路径
+  output_dir: string;
+  analyzer: string;
+  skip_tags: string[];
+  extend_tags: string[];
+  tag_order: string;
+  save_type: string;
+  limit: number;
+}
+
+export interface TaggedImage {
+  id: number;
+  image_path: string;
+  tags: Array<{
+    name: string;
+    score: number;
+    category: string;
+    is_general: boolean;
+  }>;
+  analyzer: string;
+  metadata: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+}
+
 // ==================== API 服务类 ====================
 class ApiService {
   private baseUrl: string;
@@ -526,6 +553,74 @@ class ApiService {
     }
   }
 
+  // ==================== 标签相关API ====================
+  async createTagTask(tagRequest: TagRequest): Promise<Task> {
+    try {
+      const response = await this.request<Task>('/tag/create', tagRequest, 'POST');
+      return response.data!;
+    } catch (error) {
+      console.error('创建标签任务失败:', error);
+      throw error;
+    }
+  }
+
+  async getTaggedImages(taskId?: string): Promise<TaggedImage[]> {
+    try {
+      const url = taskId ? `/tag/images?task_id=${taskId}` : '/tag/images';
+      const response = await this.request<TaggedImage[]>(url, undefined, 'GET');
+      
+      // Validate response data
+      if (!response.data) {
+        console.warn('获取标签图像: 响应数据为空');
+        return [];
+      }
+      
+      // Ensure data is an array
+      if (!Array.isArray(response.data)) {
+        console.error('获取标签图像: 响应数据不是数组', response.data);
+        return [];
+      }
+      
+      return response.data;
+    } catch (error) {
+      console.error('获取标签图像失败:', error);
+      throw error;
+    }
+  }
+
+  async deleteAllTaggedImages(): Promise<{ message: string; count: number }> {
+    try {
+      const response = await this.request<{ message: string; count: number }>('/tag/images', undefined, 'DELETE');
+      return response.data || { message: '', count: 0 };
+    } catch (error) {
+      console.error('删除标签图像失败:', error);
+      throw error;
+    }
+  }
+
+  async getAvailableAnalyzers(): Promise<string[]> {
+    try {
+      const response = await this.request<string[]>('/tag/analyzers');
+      return response.data || [];
+    } catch (error) {
+      console.error('获取可用分析器失败:', error);
+      throw error;
+    }
+  }
+
+  async analyzeImage(imagePath: string, analyzer: string): Promise<TaggedImage> {
+    try {
+      const response = await this.request<TaggedImage>('/tag/analyze', {
+        image_path: imagePath,
+        analyzer: analyzer
+      }, 'POST');
+      return response.data!;
+    } catch (error) {
+      console.error('分析图像失败:', error);
+      throw error;
+    }
+  }
+
   // ==================== 工具方法 ====================
   getImageUrl(imagePath: string): string {
     return `${this.baseUrl}/images/${imagePath}`;
@@ -562,6 +657,67 @@ class ApiService {
         return '已取消';
       default:
         return '未知';
+    }
+  }
+
+  // ==================== 角色特征管理 ====================
+  async extractCharacterTags(params: { source_dir: string; min_frequency?: number; min_weight?: number; max_tags?: number; exclude_tags?: string[] }): Promise<any> {
+    try {
+      const response = await this.request<any>('/character/extract', params, 'POST');
+      return response.data || {};
+    } catch (error) {
+      console.error('提取角色特征失败:', error);
+      throw error;
+    }
+  }
+
+  async createCharacterProfile(params: { name: string; description: string; source_dir: string; core_tags?: string[]; min_frequency?: number; min_weight?: number; max_tags?: number; exclude_tags?: string[] }): Promise<any> {
+    try {
+      const response = await this.request<any>('/character/create', params, 'POST');
+      return response.data || {};
+    } catch (error) {
+      console.error('创建角色配置失败:', error);
+      throw error;
+    }
+  }
+
+  async listCharacterProfiles(): Promise<any[]> {
+    try {
+      const response = await this.request<any[]>('/character/list', undefined, 'GET');
+      return response.data || [];
+    } catch (error) {
+      console.error('获取角色配置列表失败:', error);
+      throw error;
+    }
+  }
+
+  async getCharacterProfile(name: string): Promise<any> {
+    try {
+      const response = await this.request<any>(`/character/get?name=${name}`, undefined, 'GET');
+      return response.data || {};
+    } catch (error) {
+      console.error('获取角色配置失败:', error);
+      throw error;
+    }
+  }
+
+  async updateCharacterProfile(params: { name: string; description?: string; tags?: string[]; tag_weights?: Record<string, number> }): Promise<any> {
+    try {
+      const response = await this.request<any>('/character/update', params, 'POST');
+      return response.data || {};
+    } catch (error) {
+      console.error('更新角色配置失败:', error);
+      throw error;
+    }
+  }
+
+  async deleteCharacterProfile(name: string): Promise<any> {
+    try {
+      const response = await this.request<any>('/character/delete', { name }, 'POST');
+      return response.data || {};
+    } catch (error) {
+      console.error('删除角色配置失败:', error);
+      throw error;
     }
   }
 }

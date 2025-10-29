@@ -3,9 +3,9 @@ package grpc
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
+	"pixiv-tailor/backend/internal/logger"
 	"pixiv-tailor/backend/internal/repository"
 	"pixiv-tailor/backend/internal/service"
 	pb "pixiv-tailor/proto"
@@ -126,7 +126,7 @@ func convertTrainedModels(models []*repository.TrainedModel) []*pb.TrainedModel 
 
 // GetConfig 获取配置
 func (s *PixivTailorServer) GetConfig(ctx context.Context, req *pb.GetConfigRequest) (*pb.GetConfigResponse, error) {
-	log.Printf("收到获取配置请求: %v", req)
+	logger.Infof("收到获取配置请求: %v", req)
 
 	config, err := s.ConfigService.GetConfig(req.Module)
 	if err != nil {
@@ -153,7 +153,7 @@ func (s *PixivTailorServer) GetConfig(ctx context.Context, req *pb.GetConfigRequ
 
 // UpdateConfig 更新配置
 func (s *PixivTailorServer) UpdateConfig(ctx context.Context, req *pb.UpdateConfigRequest) (*pb.UpdateConfigResponse, error) {
-	log.Printf("收到更新配置请求: %v", req)
+	logger.Infof("收到更新配置请求: %v", req)
 
 	err := s.ConfigService.SetConfig(req.Module, req.Config)
 	if err != nil {
@@ -176,7 +176,7 @@ func (s *PixivTailorServer) UpdateConfig(ctx context.Context, req *pb.UpdateConf
 
 // ExportConfig 导出配置
 func (s *PixivTailorServer) ExportConfig(ctx context.Context, req *pb.ExportConfigRequest) (*pb.ExportConfigResponse, error) {
-	log.Printf("收到导出配置请求: %v", req)
+	logger.Infof("收到导出配置请求: %v", req)
 
 	// 简化实现，返回空配置
 
@@ -190,7 +190,7 @@ func (s *PixivTailorServer) ExportConfig(ctx context.Context, req *pb.ExportConf
 
 // ImportConfig 导入配置
 func (s *PixivTailorServer) ImportConfig(ctx context.Context, req *pb.ImportConfigRequest) (*pb.ImportConfigResponse, error) {
-	log.Printf("收到导入配置请求: %v", req)
+	logger.Infof("收到导入配置请求: %v", req)
 
 	// 简化实现，直接返回成功
 	return &pb.ImportConfigResponse{
@@ -207,7 +207,7 @@ func (s *PixivTailorServer) ImportConfig(ctx context.Context, req *pb.ImportConf
 
 // CreateTask 创建任务
 func (s *PixivTailorServer) CreateTask(ctx context.Context, req *pb.CreateTaskRequest) (*pb.CreateTaskResponse, error) {
-	log.Printf("收到创建任务请求: %v", req)
+	logger.Infof("收到创建任务请求: %v", req)
 
 	task, err := s.TaskService.CreateTask(req.Type, req.Config)
 	if err != nil {
@@ -231,7 +231,7 @@ func (s *PixivTailorServer) CreateTask(ctx context.Context, req *pb.CreateTaskRe
 
 // GetTaskStatus 获取任务状态
 func (s *PixivTailorServer) GetTaskStatus(ctx context.Context, req *pb.GetTaskStatusRequest) (*pb.GetTaskStatusResponse, error) {
-	log.Printf("收到获取任务状态请求: %v", req)
+	logger.Infof("收到获取任务状态请求: %v", req)
 
 	task, err := s.TaskService.GetTask(req.TaskId)
 	if err != nil {
@@ -255,7 +255,7 @@ func (s *PixivTailorServer) GetTaskStatus(ctx context.Context, req *pb.GetTaskSt
 
 // ListTasks 列出任务
 func (s *PixivTailorServer) ListTasks(ctx context.Context, req *pb.ListTasksRequest) (*pb.ListTasksResponse, error) {
-	log.Printf("收到列出任务请求: %v", req)
+	logger.Infof("收到列出任务请求: %v", req)
 
 	tasks, total, err := s.TaskService.ListTasks(req.Pagination.Page, req.Pagination.PageSize, req.Status, req.Type)
 	if err != nil {
@@ -284,7 +284,7 @@ func (s *PixivTailorServer) ListTasks(ctx context.Context, req *pb.ListTasksRequ
 
 // CancelTask 取消任务
 func (s *PixivTailorServer) CancelTask(ctx context.Context, req *pb.CancelTaskRequest) (*pb.CancelTaskResponse, error) {
-	log.Printf("收到取消任务请求: %v", req)
+	logger.Infof("收到取消任务请求: %v", req)
 
 	err := s.TaskService.CancelTask(req.TaskId)
 	if err != nil {
@@ -311,7 +311,7 @@ func (s *PixivTailorServer) CancelTask(ctx context.Context, req *pb.CancelTaskRe
 
 // GetTaskProgress 获取任务进度（流式响应）
 func (s *PixivTailorServer) GetTaskProgress(req *pb.GetTaskProgressRequest, stream pb.PixivTailorService_GetTaskProgressServer) error {
-	log.Printf("收到获取任务进度请求: %v", req)
+	logger.Infof("收到获取任务进度请求: %v", req)
 
 	// 获取任务信息
 	task, err := s.TaskService.GetTask(req.TaskId)
@@ -381,7 +381,7 @@ func (s *PixivTailorServer) GetTaskProgress(req *pb.GetTaskProgressRequest, stre
 
 // GetTaskLogs 获取任务日志（流式响应）
 func (s *PixivTailorServer) GetTaskLogs(req *pb.GetTaskLogsRequest, stream pb.PixivTailorService_GetTaskLogsServer) error {
-	log.Printf("收到获取任务日志请求: %v", req)
+	logger.Infof("收到获取任务日志请求: %v", req)
 
 	// 获取任务信息验证任务是否存在
 	task, err := s.TaskService.GetTask(req.TaskId)
@@ -481,7 +481,7 @@ func (s *PixivTailorServer) GetTaskLogs(req *pb.GetTaskLogsRequest, stream pb.Pi
 
 // GetCrawlResults 获取爬取结果
 func (s *PixivTailorServer) GetCrawlResults(ctx context.Context, req *pb.GetCrawlResultsRequest) (*pb.GetCrawlResultsResponse, error) {
-	log.Printf("收到获取爬取结果请求: %v", req)
+	logger.Infof("收到获取爬取结果请求: %v", req)
 
 	results, total, err := s.DataService.GetCrawlResults(req.Pagination.Page, req.Pagination.PageSize, req.Tags, req.Author)
 	if err != nil {
@@ -510,7 +510,7 @@ func (s *PixivTailorServer) GetCrawlResults(ctx context.Context, req *pb.GetCraw
 
 // GetGeneratedImages 获取生成图像
 func (s *PixivTailorServer) GetGeneratedImages(ctx context.Context, req *pb.GetGeneratedImagesRequest) (*pb.GetGeneratedImagesResponse, error) {
-	log.Printf("收到获取生成图像请求: %v", req)
+	logger.Infof("收到获取生成图像请求: %v", req)
 
 	images, total, err := s.DataService.GetGeneratedImages(req.Pagination.Page, req.Pagination.PageSize, req.Model)
 	if err != nil {
@@ -539,7 +539,7 @@ func (s *PixivTailorServer) GetGeneratedImages(ctx context.Context, req *pb.GetG
 
 // GetTrainedModels 获取训练模型
 func (s *PixivTailorServer) GetTrainedModels(ctx context.Context, req *pb.GetTrainedModelsRequest) (*pb.GetTrainedModelsResponse, error) {
-	log.Printf("收到获取训练模型请求: %v", req)
+	logger.Infof("收到获取训练模型请求: %v", req)
 
 	models, total, err := s.DataService.GetTrainedModels(req.Pagination.Page, req.Pagination.PageSize, req.Type)
 	if err != nil {
@@ -572,7 +572,7 @@ func (s *PixivTailorServer) GetTrainedModels(ctx context.Context, req *pb.GetTra
 
 // GetSystemInfo 获取系统信息
 func (s *PixivTailorServer) GetSystemInfo(ctx context.Context, req *pb.GetSystemInfoRequest) (*pb.GetSystemInfoResponse, error) {
-	log.Printf("收到获取系统信息请求: %v", req)
+	logger.Infof("收到获取系统信息请求: %v", req)
 
 	// 获取系统信息
 	sysInfo, err := s.SystemService.GetSystemInfo()

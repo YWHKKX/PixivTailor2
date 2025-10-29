@@ -4,23 +4,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 )
 
 // PathManager 路径管理器
 type PathManager struct {
-	rootDir   string
-	configDir string
-	dataDir   string
-	logsDir   string
-	imagesDir string
-	modelsDir string
-	tagsDir   string
-	posesDir  string
-	cacheDir  string
-	webuiDir  string
-	webuiBat  string
-	mu        sync.RWMutex
+	rootDir       string
+	configDir     string
+	dataDir       string
+	logsDir       string
+	imagesDir     string
+	modelsDir     string
+	tagsDir       string
+	posesDir      string
+	charactersDir string
+	configsDir    string
+	webuiDir      string
+	webuiBat      string
+	mu            sync.RWMutex
 }
 
 var (
@@ -95,7 +98,8 @@ func (pm *PathManager) initPaths() {
 	pm.modelsDir = filepath.Join(pm.rootDir, "backend", "data", "models")
 	pm.tagsDir = filepath.Join(pm.rootDir, "backend", "data", "tags")
 	pm.posesDir = filepath.Join(pm.rootDir, "backend", "data", "poses")
-	pm.cacheDir = filepath.Join(pm.rootDir, "backend", "data", "cache")
+	pm.charactersDir = filepath.Join(pm.rootDir, "backend", "data", "characters")
+	pm.configsDir = filepath.Join(pm.rootDir, "backend", "data", "configs")
 
 	// WebUI 路径配置
 	pm.webuiDir = "D:\\PythonProject\\stable-diffusion-webui"
@@ -113,7 +117,8 @@ func (pm *PathManager) ensureDirectories() error {
 		pm.modelsDir,
 		pm.tagsDir,
 		pm.posesDir,
-		pm.cacheDir,
+		pm.charactersDir,
+		pm.configsDir,
 	}
 	pm.mu.RUnlock()
 
@@ -230,25 +235,34 @@ func (pm *PathManager) GetPosePath(filename string) string {
 	return filepath.Join(pm.posesDir, filename)
 }
 
-// GetCacheDir 获取缓存目录
-func (pm *PathManager) GetCacheDir() string {
+// GetCharactersDir 获取角色配置文件目录
+func (pm *PathManager) GetCharactersDir() string {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	return pm.cacheDir
+	return pm.charactersDir
 }
 
-// GetTaskCacheDir 获取任务缓存目录
-func (pm *PathManager) GetTaskCacheDir(taskID string) string {
+// GetConfigsDir 获取配置目录 (backend/data/configs)
+func (pm *PathManager) GetConfigsDir() string {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	return filepath.Join(pm.cacheDir, fmt.Sprintf("task_%s", taskID))
+	return pm.configsDir
 }
 
 // GetTaskImagesDir 获取任务图片目录
-func (pm *PathManager) GetTaskImagesDir(taskID string) string {
+// 新格式：2025-10-28_21-16_任务类型_哈希值
+// 注意：冒号替换为连字符，避免Windows文件名限制
+func (pm *PathManager) GetTaskImagesDir(taskID string, taskType string, createdAt time.Time) string {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	return filepath.Join(pm.imagesDir, fmt.Sprintf("task_%s", taskID))
+
+	// 格式化时间为 YYYY-MM-DD_HH-MM 格式（冒号替换为连字符）
+	timeStr := createdAt.Format("2006-01-02_15-04")
+
+	// 组合为：2025-10-28_21-16_任务类型_哈希值
+	dirName := fmt.Sprintf("%s_%s_%s", timeStr, taskType, taskID)
+
+	return filepath.Join(pm.imagesDir, dirName)
 }
 
 // Join 连接路径（相对于根目录）
@@ -301,4 +315,57 @@ func (pm *PathManager) GetWebUIBat() string {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 	return pm.webuiBat
+}
+
+// ResolvePath 解析相对路径为绝对路径
+// 支持的前缀: images/, tags/, cache/, logs/, models/, poses/
+// 如果不是这些前缀，则相对于根目录
+func (pm *PathManager) ResolvePath(relativePath string) string {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	// 如果已经是绝对路径，直接返回
+	if filepath.IsAbs(relativePath) {
+		return relativePath
+	}
+
+	// 处理不同的路径前缀
+	switch {
+	case strings.HasPrefix(relativePath, "images/"):
+		// 图片目录: images/task_xxx -> backend/data/images/task_xxx
+		imageName := relativePath[7:] // len("images/") = 7
+		return filepath.Join(pm.imagesDir, imageName)
+	case strings.HasPrefix(relativePath, "tags/"):
+		// 标签目录: tags/ 或 tags/subdir -> backend/data/tags/ 或 backend/data/tags/subdir
+		tagName := relativePath[5:] // len("tags/") = 5
+		// 如果 tagName 为空，返回 tagsDir 的完整路径
+		if tagName == "" {
+			return pm.tagsDir
+		}
+		return filepath.Join(pm.tagsDir, tagName)
+	case strings.HasPrefix(relativePath, "logs/"):
+		// 日志目录
+		logName := relativePath[5:] // len("logs/") = 5
+		if logName == "" {
+			return pm.logsDir
+		}
+		return filepath.Join(pm.logsDir, logName)
+	case strings.HasPrefix(relativePath, "models/"):
+		// 模型目录
+		modelName := relativePath[7:] // len("models/") = 7
+		if modelName == "" {
+			return pm.modelsDir
+		}
+		return filepath.Join(pm.modelsDir, modelName)
+	case strings.HasPrefix(relativePath, "poses/"):
+		// 姿势目录
+		poseName := relativePath[6:] // len("poses/") = 6
+		if poseName == "" {
+			return pm.posesDir
+		}
+		return filepath.Join(pm.posesDir, poseName)
+	default:
+		// 默认相对于根目录
+		return filepath.Join(pm.rootDir, relativePath)
+	}
 }

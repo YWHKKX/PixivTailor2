@@ -11,6 +11,7 @@ import { AuthProvider } from '@/contexts/AuthContext';
 import HomePage from '@/pages/HomePage';
 import AIGeneratorPage from '@/pages/AIGeneratorPage';
 import CrawlerPage from '@/pages/CrawlerPage';
+import TaggerPage from '@/pages/TaggerPage';
 import HistoryPage from '@/pages/HistoryPage';
 // 已移除 SettingsPage
 import ConfigManagerPage from '@/pages/ConfigManagerPage';
@@ -67,6 +68,7 @@ const App: React.FC = () => {
                                 <Route path="/" element={<HomePage />} />
                                 <Route path="/ai-generator" element={<AIGeneratorPage />} />
                                 <Route path="/crawler" element={<CrawlerPage />} />
+                                <Route path="/tagger" element={<TaggerPage />} />
                                 <Route path="/history" element={<HistoryPage />} />
                                 {/* 已移除系统设置页面 */}
                                 <Route path="/config-manager" element={<ConfigManagerPage />} />

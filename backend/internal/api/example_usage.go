@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"pixiv-tailor/backend/internal/logger"
 	"pixiv-tailor/backend/pkg/models"
 	"pixiv-tailor/backend/pkg/paths"
 )
@@ -41,11 +42,11 @@ func ExampleUsage() {
 	// 5. 使用Pixiv API进行搜索
 	images, err := pixivAPI.SearchByTag("1girl", "popular", "all", 10)
 	if err != nil {
-		fmt.Printf("搜索失败: %v\n", err)
+		logger.Errorf("搜索失败: %v", err)
 		return
 	}
 
-	fmt.Printf("找到 %d 张图片\n", len(images))
+	logger.Infof("找到 %d 张图片", len(images))
 
 	// 6. 下载图片
 	for i, image := range images {
@@ -58,9 +59,9 @@ func ExampleUsage() {
 
 		err := pixivAPI.DownloadImage(image.URL, savePath)
 		if err != nil {
-			fmt.Printf("下载失败 %s: %v\n", image.URL, err)
+			logger.Errorf("下载失败 %s: %v", image.URL, err)
 		} else {
-			fmt.Printf("下载成功: %s\n", savePath)
+			logger.Infof("下载成功: %s", savePath)
 		}
 	}
 }
@@ -78,7 +79,7 @@ func ExampleCrawlerRefactor() {
 	// 2. 按标签爬取 - 原来需要100+行代码，现在只需要几行
 	images, err := pixivAPI.SearchByTag("anime", "popular", "all", 50)
 	if err != nil {
-		fmt.Printf("爬取失败: %v\n", err)
+		logger.Errorf("爬取失败: %v", err)
 		return
 	}
 
@@ -88,7 +89,7 @@ func ExampleCrawlerRefactor() {
 		savePath := filepath.Join("data/images", filename)
 
 		if err := pixivAPI.DownloadImage(image.URL, savePath); err != nil {
-			fmt.Printf("下载失败: %v\n", err)
+			logger.Errorf("下载失败: %v", err)
 		}
 	}
 }
@@ -125,7 +126,7 @@ func ExampleTaskServiceRefactor() {
 	}
 
 	if err != nil {
-		fmt.Printf("爬取失败: %v\n", err)
+		logger.Errorf("爬取失败: %v", err)
 		return
 	}
 
@@ -135,7 +136,7 @@ func ExampleTaskServiceRefactor() {
 		savePath := filepath.Join("data/images", filename)
 
 		if err := pixivAPI.DownloadImage(image.URL, savePath); err != nil {
-			fmt.Printf("下载失败: %v\n", err)
+			logger.Errorf("下载失败: %v", err)
 		}
 	}
 }

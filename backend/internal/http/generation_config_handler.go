@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"pixiv-tailor/backend/internal/logger"
 	"pixiv-tailor/backend/pkg/models"
 	"pixiv-tailor/backend/pkg/paths"
 
@@ -224,7 +224,7 @@ func (s *HTTPServer) handleCreateConfig(w http.ResponseWriter, r *http.Request) 
 	// 保存配置到JSON文件
 	if err := s.saveConfigToFile(convertResponseToConfig(config)); err != nil {
 		// 如果保存文件失败，记录错误但不影响数据库操作
-		log.Printf("Failed to save config to file: %v", err)
+		logger.Infof("Failed to save config to file: %v", err)
 	}
 
 	s.sendSuccessResponse(w, config)
@@ -568,7 +568,7 @@ func (s *HTTPServer) handleImportConfig(w http.ResponseWriter, r *http.Request) 
 	// 保存配置到JSON文件
 	if err := s.saveConfigToFile(convertResponseToConfig(config)); err != nil {
 		// 如果保存文件失败，记录错误但不影响数据库操作
-		log.Printf("Failed to save imported config to file: %v", err)
+		logger.Infof("Failed to save imported config to file: %v", err)
 	}
 
 	s.sendSuccessResponse(w, config)

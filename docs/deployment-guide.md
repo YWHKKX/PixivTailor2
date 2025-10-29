@@ -286,6 +286,80 @@ PixivTailor 采用前后端分离架构，使用 HTTP + WebSocket 进行通信�
 - 配置回滚
 - 服务恢复
 
+## Stable Diffusion WebUI 集成
+
+### WebUI 安装与配置
+
+**WebUI 安装**:
+1. 安装 Python 3.10+
+2. 安装 Stable Diffusion WebUI
+3. 安装 WD14 Tagger 扩展（用于图像标签生成）
+4. 下载所需模型文件
+
+**WebUI 配置**:
+- **端口**: 默认 7860
+- **API 启用**: 使用 `--api` 启动参数
+- **标签器设备**: 使用 `--tagger-device cpu` 或 `--tagger-device cuda`（推荐 CPU）
+- **模型路径**: 确保模型文件正确放置
+
+**启动 WebUI**:
+```bash
+# 使用示例
+python launch.py --api --tagger-device cpu
+
+# 或使用提供的脚本
+scripts/start-webui-api.bat
+```
+
+### WebUI 状态监控 ✅
+
+**功能描述**: 实时监控 Stable Diffusion WebUI 的运行状态
+
+**支持功能**:
+- **状态检测**: 定期检测 WebUI 是否运行 ✅
+- **连接检查**: 验证 API 端点可访问性 ✅
+- **前端显示**: 在AI生成器页面显示WebUI状态 ✅
+- **自动重试**: 连接失败时自动重试 ✅
+- **日志记录**: 记录WebUI连接日志 ✅
+
+**监控机制**:
+```typescript
+// 前端每5秒检查一次WebUI状态
+useEffect(() => {
+  const interval = setInterval(() => {
+    checkWebUIStatus();
+  }, 5000);
+  return () => clearInterval(interval);
+}, []);
+```
+
+**状态显示**:
+- **运行中**: 绿色指示器，显示可用
+- **已停止**: 红色指示器，显示不可用
+- **错误**: 黄色指示器，显示错误信息
+
+**API 端点**:
+- `GET /api/webui/status` - 获取WebUI状态
+- `POST /api/webui/start` - 启动WebUI（如果支持）
+- `POST /api/webui/stop` - 停止WebUI（如果支持）
+
+### 常见 WebUI 问题
+
+**WD14 Tagger CUDA 错误**:
+- 问题: 提示需要 cuDNN 9.x 和 CUDA 12.x
+- 解决方案: 使用 CPU 模式运行 `--tagger-device cpu`
+- 或安装正确的 CUDA/cuDNN 版本
+
+**API 不可访问**:
+- 检查 WebUI 是否使用 `--api` 参数启动
+- 检查防火墙设置
+- 验证端口是否被占用
+
+**标签生成失败**:
+- 检查 WD14 Tagger 扩展是否安装
+- 检查模型文件是否存在
+- 查看 WebUI 日志获取详细错误
+
 ## 故障排除
 
 ### 常见问题

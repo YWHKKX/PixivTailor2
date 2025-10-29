@@ -412,8 +412,8 @@ func (t *WD14Tagger) SaveTags(taggedImage *models.TaggedImage, outputDir, saveTy
 
 // GetAvailableAnalyzers 获取可用的分析器
 func (t *WD14Tagger) GetAvailableAnalyzers() ([]string, error) {
-	// TODO: 实现分析器列表获取逻辑
-	return []string{"wd14tagger", "deepdanbooru"}, nil
+	// 只返回 WD14 Tagger
+	return []string{"wd14tagger"}, nil
 }
 
 // AnalyzeImage 分析单张图像

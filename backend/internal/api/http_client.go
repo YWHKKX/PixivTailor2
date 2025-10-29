@@ -137,6 +137,11 @@ func (h *httpClientImpl) Do(req *http.Request) (*http.Response, error) {
 	h.requestLimiter <- struct{}{}
 	defer func() { <-h.requestLimiter }()
 
+	// 应用配置的延迟
+	if h.config.Delay > 0 {
+		time.Sleep(h.config.Delay)
+	}
+
 	return h.client.Do(req)
 }
 

@@ -5,7 +5,8 @@
 ## 📁 模块结构
 
 - **backend/internal/crawler/**: 爬虫核心实现目录
-- **crawler.go**: 爬虫核心实现文件
+- **backend/internal/http/crawler_handler.go**: 爬虫任务处理器 ✅
+- **backend/internal/service/task_service.go**: 统一任务调度器 ✅
 - **backend/internal/api/**: API接口实现
 - **backend/internal/http/**: HTTP服务器集成
 
@@ -97,6 +98,38 @@
 **功能特点**:
 - 支持多种图片格式（JPG、PNG、GIF、WebP）
 - 自动创建目录结构
+
+### 5. 文件管理系统 ✅
+
+**功能描述**: 管理爬取的文件和任务目录
+
+**支持功能**:
+- **批量删除**: 支持批量删除文件和文件夹 ✅
+- **优先级删除**: 先删除文件，后删除文件夹 ✅
+- **任务文件夹命名**: 时间戳+类型+哈希格式（`YYYY-MM-DD_HH-MM_taskType_hash`）✅
+- **文件树浏览**: 可视化浏览任务文件和目录 ✅
+- **按时间排序**: 文件树按修改时间降序排列（新文件在前）✅
+- **根目录保护**: 禁止删除images根目录 ✅
+- **路径解析**: 正确的路径解析（处理绝对路径）✅
+
+**任务文件夹命名规则**:
+```
+旧格式: task_{hash} (兼容)
+新格式: YYYY-MM-DD_HH-MM_{taskType}_{hash}
+示例: 2025-10-28_21-16_crawl_0a64cf20
+
+优点:
+- 包含时间戳，便于识别
+- 包含任务类型，便于分类
+- 避免Windows文件名限制（[] 和 :）
+```
+
+**删除模式**:
+1. 启用删除模式（复选框）
+2. 选择文件和文件夹
+3. 显示已选择数量
+4. 确认删除
+5. 优先删除文件，再删除文件夹
 - 断点续传支持
 - 文件完整性验证
 - 实时下载进度显示
@@ -341,6 +374,11 @@
 - `POST /api/crawl/results` - 获取爬虫结果
 - `POST /api/generated/images` - 获取生成的图片
 
+**文件管理**:
+- `POST /api/filetree` - 获取文件树（支持按时间排序）
+- `POST /api/files/delete` - 批量删除文件和文件夹
+- `GET /api/images/{path}` - 获取图片文件
+
 **任务管理**:
 - `POST /api/task/start` - 启动任务
 - `POST /api/task/stop` - 停止任务
@@ -364,6 +402,12 @@
 - `task_update` - 任务状态更新
 - `log_message` - 日志消息
 - `global_log` - 全局日志消息
+
+**前端显示增强**:
+- 任务类型中文显示（爬取任务、标签任务、生成任务）✅
+- 批量删除UI（复选框选择、已选数量显示）✅
+- 文件树排序（按修改时间降序）✅
+- 任务状态区分（已完成/部分完成/失败）✅
 
 **任务更新数据结构**:
 ```json
@@ -531,9 +575,66 @@
 - 设置代理服务器
 - 自定义文件名模板和下载选项
 
+## 🎯 任务管理集成
+
+爬虫模块已集成到统一的任务管理系统中，实现智能队列调度和并发控制。
+
+### 任务执行流程
+
+```
+1. CrawlerHandler 接收请求
+   ↓
+2. 创建爬虫任务（taskService.CreateTask("crawl", config)）
+   ↓
+3. TaskService 检查队列
+   - 如果同类型有运行中任务 → 加入等待队列
+   - 如果没有 → 立即启动
+   ↓
+4. executeCrawlTask 执行爬取
+   - 创建爬虫实例
+   - 执行爬取（tag/user/illust）
+   - 保存结果
+   ↓
+5. 任务完成 → 自动启动下一个等待中的任务
+```
+
+### 并发控制
+
+- **同类型串行**: 多个 crawl 任务依次执行
+- **不同类型并发**: generate、crawl、tag 任务可以同时运行
+- **智能队列**: 按类型分组的等待队列，互不干扰
+
+### API 接口
+
+```typescript
+// 创建爬虫任务
+POST /api/crawl/create
+{
+  "crawl_type": "tag",
+  "query": "tag1,tag2",
+  "limit": 10,
+  ...
+}
+
+// 获取爬虫任务列表
+POST /api/tasks
+{
+  "pagination": {"page": 1, "page_size": 20},
+  "type": "crawl"  // 筛选爬虫任务
+}
+
+// 停止爬虫任务
+POST /api/task/stop
+{
+  "task_id": "..."
+}
+```
+
+详见[任务管理器文档](./task-manager.md)了解更多细节。
+
 ## 📚 相关文档
 
-- [配置说明](configuration.md)
-- [数据模型](models.md)
-- [错误处理](error-handling.md)
-- [性能优化](performance.md)
+- [任务管理器文档](./task-manager.md) - 统一的任务调度系统
+- [AI模块文档](./ai-module.md) - AI生成任务
+- [标签模块文档](./tagger-module.md) - 图像标签生成
+- [配置模块文档](./config-module.md) - 配置文件管理

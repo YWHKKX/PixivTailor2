@@ -21,6 +21,8 @@ import {
     Badge,
     Spin
 } from 'antd';
+
+const { Text } = Typography;
 import {
     PlayCircleOutlined,
     PauseCircleOutlined,
@@ -51,7 +53,6 @@ import { apiService } from '@/services/api';
 import { wsManager } from '@/services/websocket';
 import { Task, PixivImage, CrawlRequest, TaskStatus, CrawlType, Order, Mode } from '@/services/appState';
 
-const { Text } = Typography;
 const { Option } = Select;
 const { Search } = Input;
 
@@ -172,6 +173,7 @@ const CrawlerPage: React.FC = () => {
     const [proxyEnabled, setProxyEnabled] = useState<boolean>(false);
     const [proxyUrl, setProxyUrl] = useState<string>('127.0.0.1:7890');
     const [useCookie, setUseCookie] = useState<boolean>(false);
+    const [enableMaxImages, setEnableMaxImages] = useState<boolean>(false);
     const [useDefaultCookie, setUseDefaultCookie] = useState<boolean>(true);
     const [pixivCookie, setPixivCookie] = useState<string>('');
     const [isFailedUrlsModalVisible, setIsFailedUrlsModalVisible] = useState(false);
@@ -192,6 +194,10 @@ const CrawlerPage: React.FC = () => {
     const lastScrollTopRef = useRef<number>(0);
     const fileTreeDataCacheRef = useRef<FileTreeNode[] | null>(null);
     const lastBackendTreeRef = useRef<string>('');
+
+    // 批量删除相关状态
+    const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+    const [deleteMode, setDeleteMode] = useState(false);
 
 
     // 防抖保存滚动位置
@@ -319,19 +325,24 @@ const CrawlerPage: React.FC = () => {
 
     // 加载文件树数据
     const loadFileTree = async (force = false) => {
-        // 防止重复加载
-        if (isLoadingFileTreeRef.current && !force) {
+        // 如果已经加载过且不是强制刷新，直接使用缓存
+        if (hasLoadedFileTreeRef.current && !force && fileTreeDataCacheRef.current) {
+            console.log('使用缓存的文件树数据');
+            setFileTreeData(fileTreeDataCacheRef.current);
+            setExpandedKeys(prev => prev.length === 0 ? ['images'] : prev);
             return;
         }
 
-        // 如果已经加载过且不是强制刷新，跳过
-        if (hasLoadedFileTreeRef.current && !force) {
+        // 防止重复加载
+        if (isLoadingFileTreeRef.current && !force) {
+            console.log('文件树正在加载中，跳过本次请求');
             return;
         }
 
         try {
             isLoadingFileTreeRef.current = true;
             setFileTreeLoading(true);
+            console.log('开始加载文件树...');
 
             // 从后端API获取真实的文件树数据
             const response = await fetch(`${API_BASE_URL}/filetree`, {
@@ -348,6 +359,7 @@ const CrawlerPage: React.FC = () => {
 
             const data = await response.json();
             const backendFileTree = data.data.fileTree;
+            console.log('文件树数据获取成功');
 
             // 检查后端数据是否变化，避免不必要的重新转换
             const backendTreeString = JSON.stringify(backendFileTree);
@@ -365,6 +377,7 @@ const CrawlerPage: React.FC = () => {
             }
 
             setFileTreeData(fileTreeData);
+            console.log('文件树数据已设置');
             // 只在expandedKeys为空时才设置默认值，避免不必要的重新渲染
             setExpandedKeys(prev => prev.length === 0 ? ['images'] : prev);
             // 只在强制刷新时恢复滚动位置
@@ -427,8 +440,11 @@ const CrawlerPage: React.FC = () => {
 
     // 初始化数据
     useEffect(() => {
+        // 只在首次加载时加载文件树
+        if (!hasLoadedFileTreeRef.current) {
+            loadFileTree();
+        }
         loadTasks();
-        loadFileTree();
         // 设置默认爬取类型
         setCrawlType('tag');
 
@@ -474,55 +490,39 @@ const CrawlerPage: React.FC = () => {
 
 
         const handleLogMessage = (data: any) => {
-            // 检查消息类型
-            if (data.type === 'log_message') {
-                // 尝试从不同的位置获取数据
-                let logData = data.data || data;
-                const { task_id, level, message, time } = logData;
-                if (task_id && level && message) {
-                    setTaskLogs(prev => ({
-                        ...prev,
-                        [task_id]: [...(prev[task_id] || []), { level, message, time }]
-                    }));
-                }
-            } else if (data.type === 'global_log') {
-                // 处理全局日志
-                const { level, message, time } = data.data || data;
-                if (level && message) {
-                    setGlobalLogs(prev => {
-                        const newLogs = [...prev, { level, message, time }];
-                        return newLogs;
-                    });
-                }
-            } else {
-                // 处理直接传递的日志数据（没有type包装）
-                if (data.task_id && data.level && data.message) {
-                    // 这是任务日志
-                    setTaskLogs(prev => ({
-                        ...prev,
-                        [data.task_id]: [...(prev[data.task_id] || []), { level: data.level, message: data.message, time: data.time }]
-                    }));
-                } else if (data.level && data.message && !data.task_id) {
-                    // 这是全局日志
-                    setGlobalLogs(prev => {
-                        const newLogs = [...prev, { level: data.level, message: data.message, time: data.time }];
-                        return newLogs;
-                    });
-                }
+            // data 已经是 log_message 类型的消息体，不需要再检查 type
+            const { task_id, level, message, time } = data;
+            if (task_id && level && message) {
+                setTaskLogs(prev => ({
+                    ...prev,
+                    [task_id]: [...(prev[task_id] || []), { level, message, time }]
+                }));
+            }
+        };
+
+        const handleGlobalLog = (data: any) => {
+            // data 已经是 global_log 类型的消息体
+            const { level, message, time } = data;
+            if (level && message) {
+                setGlobalLogs(prev => {
+                    const newLogs = [...prev, { level, message, time }];
+                    // 限制全局日志条数，避免内存泄漏
+                    return newLogs.slice(-100);
+                });
             }
         };
 
         // 注册WebSocket事件监听器
         wsManager.on('task_update', handleTaskUpdate);
         wsManager.on('log_message', handleLogMessage);
-        wsManager.on('global_log', handleLogMessage);
+        wsManager.on('global_log', handleGlobalLog);
 
         // 清理函数
         return () => {
             clearInterval(interval);
             wsManager.off('task_update', handleTaskUpdate);
             wsManager.off('log_message', handleLogMessage);
-            wsManager.off('global_log', handleLogMessage);
+            wsManager.off('global_log', handleGlobalLog);
 
             // 清理文件树刷新定时器
             if (fileTreeRefreshTimeoutRef.current) {
@@ -548,7 +548,10 @@ const CrawlerPage: React.FC = () => {
         onImageSelect,
         onToggleExpand,
         scrollRef,
-        onScroll
+        onScroll,
+        deleteMode,
+        selectedFiles,
+        onFileSelect
     }: {
         fileTreeData: FileTreeNode[];
         expandedKeys: string[];
@@ -557,22 +560,41 @@ const CrawlerPage: React.FC = () => {
         onToggleExpand: (key: string) => void;
         scrollRef: React.RefObject<HTMLDivElement>;
         onScroll: (scrollTop: number) => void;
+        deleteMode: boolean;
+        selectedFiles: Set<string>;
+        onFileSelect: (filePath: string, checked: boolean) => void;
     }) => {
 
         // 文件树节点组件
         const FileTreeNodeComponent = React.memo(({ node, isVisible }: { node: FileTreeNode, isVisible: boolean }) => {
             const isExpanded = expandedKeys.includes(node.key);
             const isSelected = selectedImage === node.filePath;
+            // 排除根目录（level 0 或 key 为 'images'）的复选框
+            const isRootNode = (node.level === 0) || (node.key === 'images');
+            const isChecked = deleteMode && !isRootNode && node.filePath ? selectedFiles.has(node.filePath) : false;
 
-            const handleToggle = () => {
+            const handleToggle = (e: React.MouseEvent) => {
+                e.stopPropagation();
                 if (node.children && node.children.length > 0) {
                     onToggleExpand(node.key);
                 }
             };
 
             const handleSelect = () => {
-                if (node.isLeaf && node.filePath) {
-                    onImageSelect(node.filePath);
+                if (deleteMode) {
+                    // 删除模式下，可以选择文件夹或文件，排除根目录
+                    if (!isRootNode && node.filePath) {
+                        // 选择文件夹或文件路径
+                        onFileSelect(node.filePath, !isChecked);
+                    }
+                } else {
+                    // 正常模式下，选择图片预览
+                    if (node.isLeaf && node.filePath) {
+                        onImageSelect(node.filePath);
+                    } else if (!node.isLeaf && node.children && node.children.length > 0) {
+                        // 点击目录时也切换展开状态
+                        onToggleExpand(node.key);
+                    }
                 }
             };
 
@@ -586,7 +608,7 @@ const CrawlerPage: React.FC = () => {
                         display: 'flex',
                         alignItems: 'center',
                         padding: '4px 8px',
-                        cursor: node.isLeaf ? 'pointer' : 'default',
+                        cursor: 'pointer',
                         backgroundColor: isSelected ? '#e6f7ff' : 'transparent',
                         borderLeft: isSelected ? '3px solid #1890ff' : '3px solid transparent',
                         height: '32px',
@@ -607,20 +629,41 @@ const CrawlerPage: React.FC = () => {
                     {/* 展开/收起按钮 */}
                     {node.children && node.children.length > 0 && (
                         <div
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                handleToggle();
-                            }}
+                            onClick={(e) => handleToggle(e)}
                             style={{
                                 marginRight: '8px',
                                 cursor: 'pointer',
                                 fontSize: '12px',
                                 width: '16px',
-                                textAlign: 'center'
+                                textAlign: 'center',
+                                userSelect: 'none'
                             }}
                         >
                             {isExpanded ? '▼' : '▶'}
                         </div>
+                    )}
+                    {!node.children || node.children.length === 0 ? (
+                        <span style={{ marginLeft: '22px' }}></span>
+                    ) : null}
+                    {/* 删除模式下的复选框（显示在任务文件夹和单个文件上，排除根目录） */}
+                    {deleteMode && !isRootNode && node.filePath && (
+                        <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={(e) => {
+                                e.stopPropagation();
+                                if (node.filePath) {
+                                    onFileSelect(node.filePath, e.target.checked);
+                                }
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            style={{
+                                marginRight: '8px',
+                                cursor: 'pointer',
+                                width: '16px',
+                                height: '16px'
+                            }}
+                        />
                     )}
                     {/* 文件/文件夹图标 */}
                     <span style={{ marginRight: '8px', fontSize: '14px' }}>
@@ -679,7 +722,10 @@ const CrawlerPage: React.FC = () => {
             prevProps.onImageSelect === nextProps.onImageSelect &&
             prevProps.onToggleExpand === nextProps.onToggleExpand &&
             prevProps.scrollRef === nextProps.scrollRef &&
-            prevProps.onScroll === nextProps.onScroll
+            prevProps.onScroll === nextProps.onScroll &&
+            prevProps.deleteMode === nextProps.deleteMode &&
+            prevProps.selectedFiles === nextProps.selectedFiles &&
+            prevProps.onFileSelect === nextProps.onFileSelect
         );
     });
 
@@ -801,25 +847,58 @@ const CrawlerPage: React.FC = () => {
             title: '任务名称',
             dataIndex: 'name',
             key: 'name',
-            render: (text: string, record: Task) => (
-                <Space>
-                    <Text strong>{text || `${record.type}任务-${record.id.slice(-8)}`}</Text>
-                    {record.status === 'running' && <Badge status="processing" />}
-                    {record.status === 'completed' && <Badge status="success" />}
-                    {record.status === 'failed' && <Badge status="error" />}
-                </Space>
-            )
+            render: (text: string, record: Task) => {
+                // 将任务类型转换为中文
+                const typeMap: { [key: string]: string } = {
+                    'crawl': '爬取',
+                    'tag': '标签',
+                    'generate': '生成',
+                    'train': '训练',
+                    'classify': '分类'
+                };
+                const typeName = typeMap[record.type] || record.type;
+
+                return (
+                    <Space>
+                        <Text strong>{text || `${typeName}任务-${record.id.slice(-8)}`}</Text>
+                        {record.status === 'running' && <Badge status="processing" />}
+                        {record.status === 'completed' && <Badge status="success" />}
+                        {record.status === 'failed' && <Badge status="error" />}
+                    </Space>
+                );
+            }
         },
         {
             title: '状态',
             dataIndex: 'status',
             key: 'status',
             render: (status: TaskStatus, record: Task) => {
-                // 检查是否为部分完成状态（获取数量 > 下载数量）
-                const isPartialComplete = record.status === 'completed' &&
-                    (record.images_found || 0) > 0 &&
-                    (record.images_downloaded || 0) > 0 &&
-                    (record.images_found || 0) > (record.images_downloaded || 0);
+                // 检查是否为部分完成状态
+                // 如果下载数量等于预期数量，即使 images_found 更多也不显示为部分完成
+                let isPartialComplete = false;
+                if (record.status === 'completed') {
+                    const imagesFound = record.images_found || 0;
+                    const imagesDownloaded = record.images_downloaded || 0;
+
+                    // 尝试从 result 中获取预期下载数量
+                    let expectedImages = 0;
+                    try {
+                        if (record.result) {
+                            const result = typeof record.result === 'string' ? JSON.parse(record.result) : record.result;
+                            expectedImages = result.expected_images || 0;
+                        }
+                    } catch (e) {
+                        // 忽略解析错误
+                    }
+
+                    // 如果有预期数量且下载数量达到了预期，就是完全完成
+                    if (expectedImages > 0 && imagesDownloaded === expectedImages) {
+                        isPartialComplete = false;
+                    } else if (imagesFound > 0 && imagesDownloaded > 0 && imagesFound > imagesDownloaded) {
+                        // 否则，如果获取数量大于下载数量，就是部分完成
+                        isPartialComplete = true;
+                    }
+                }
 
                 const statusMap = {
                     pending: { color: 'default', text: '等待中' },
@@ -902,11 +981,24 @@ const CrawlerPage: React.FC = () => {
                             onClick={() => handleViewDetail(record)}
                         />
                     </Tooltip>
-                    {/* 部分完成状态：显示查看失败URL按钮 */}
-                    {record.status === 'completed' &&
-                        (record.images_found || 0) > 0 &&
-                        (record.images_downloaded || 0) > 0 &&
-                        (record.images_found || 0) > (record.images_downloaded || 0) && (
+                    {/* 部分完成状态：显示查看失败URL按钮（仅在真正下载失败时显示） */}
+                    {(() => {
+                        const imagesFound = record.images_found || 0;
+                        const imagesDownloaded = record.images_downloaded || 0;
+                        let expectedImages = 0;
+                        try {
+                            if (record.result) {
+                                const result = typeof record.result === 'string' ? JSON.parse(record.result) : record.result;
+                                expectedImages = result.expected_images || 0;
+                            }
+                        } catch (e) { }
+
+                        // 只有真正下载失败时才显示按钮（下载数量小于预期数量）
+                        const hasRealFailures = expectedImages > 0 ?
+                            imagesDownloaded < expectedImages :
+                            imagesFound > 0 && imagesDownloaded > 0 && imagesFound > imagesDownloaded;
+
+                        return record.status === 'completed' && hasRealFailures && (
                             <Tooltip title="查看失败URL">
                                 <Button
                                     type="text"
@@ -914,7 +1006,9 @@ const CrawlerPage: React.FC = () => {
                                     onClick={() => handleViewFailedUrls(record)}
                                 />
                             </Tooltip>
-                        )}
+                        );
+                    })()}
+                    {/* 已完成/失败任务显示重新运行按钮 */}
                     {(record.status === 'completed' || record.status === 'failed') && (
                         <Tooltip title="重新运行">
                             <Button
@@ -924,14 +1018,17 @@ const CrawlerPage: React.FC = () => {
                             />
                         </Tooltip>
                     )}
-                    <Tooltip title="停止">
-                        <Button
-                            type="text"
-                            danger
-                            icon={<StopOutlined />}
-                            onClick={() => handleStopTask(record.id)}
-                        />
-                    </Tooltip>
+                    {/* 只在运行中或等待中显示停止按钮 */}
+                    {(record.status === 'running' || record.status === 'pending') && (
+                        <Tooltip title="停止">
+                            <Button
+                                type="text"
+                                danger
+                                icon={<StopOutlined />}
+                                onClick={() => handleStopTask(record.id)}
+                            />
+                        </Tooltip>
+                    )}
                 </Space>
             )
         }
@@ -988,6 +1085,26 @@ const CrawlerPage: React.FC = () => {
 
     const handleViewFailedUrls = async (task: Task) => {
         try {
+            // 判断是否是图片数量限制导致的
+            let expectedImages = 0;
+            let hasLimit = false;
+            try {
+                if (task.result) {
+                    const result = typeof task.result === 'string' ? JSON.parse(task.result) : task.result;
+                    expectedImages = result.expected_images || 0;
+                    hasLimit = result.has_limit || false;
+                }
+            } catch (e) { }
+
+            const imagesFound = task.images_found || 0;
+            const imagesDownloaded = task.images_downloaded || 0;
+
+            // 如果是因为图片数量限制，显示不同的消息
+            if (hasLimit && imagesDownloaded === expectedImages && imagesFound > imagesDownloaded) {
+                message.info(`此任务已达到图片数量限制（限制 ${expectedImages} 张），已获取 ${imagesFound} 张但只下载了 ${imagesDownloaded} 张`);
+                return;
+            }
+
             // 模拟获取失败URL数据（实际应该从后端API获取）
             const mockFailedUrls = [
                 { url: 'https://i.pximg.net/img-original/img/2025/01/18/18/55/57/126337059_p0.png', reason: '代理连接失败', filename: 'artworks_126337059_p01.png' },
@@ -1138,21 +1255,103 @@ const CrawlerPage: React.FC = () => {
     };
 
     const handleBatchDelete = () => {
+        setDeleteMode(true);
+        setSelectedFiles(new Set());
+    };
+
+    const handleCancelDelete = () => {
+        setDeleteMode(false);
+        setSelectedFiles(new Set());
+    };
+
+    const handleConfirmDelete = async () => {
+        if (selectedFiles.size === 0) {
+            message.warning('请至少选择一个文件或文件夹');
+            return;
+        }
+
+        const itemsToDelete = Array.from(selectedFiles);
+        const itemCount = itemsToDelete.length;
+        const itemNames = itemsToDelete
+            .filter(path => path != null)
+            .map(path => {
+                if (typeof path === 'string') {
+                    // 提取文件名或文件夹名
+                    return path.split(/[/\\]/).pop() || path;
+                }
+                return path;
+            })
+            .join('、');
+
+        // 检查是否包含文件夹（路径中不包含文件扩展名）
+        const hasFolders = itemsToDelete.some(path => {
+            if (typeof path === 'string') {
+                const ext = path.substring(path.lastIndexOf('.'));
+                return !ext.match(/^\.(jpg|jpeg|png|gif|webp|svg|ico|bmp)$/i);
+            }
+            return true; // 默认当作文件夹处理
+        });
+
         Modal.confirm({
-            title: '批量删除确认',
-            content: `确定要删除所有 ${results?.length || 0} 张图片吗？此操作不可撤销。`,
+            title: '确认删除',
+            content: (
+                <div>
+                    <p>确定要删除以下 <strong>{itemCount}</strong> 个项目吗？</p>
+                    <p style={{ fontSize: '13px', color: '#666', marginTop: '8px' }}>
+                        {itemNames}
+                    </p>
+                    {hasFolders && (
+                        <p style={{ color: '#ff4d4f', marginTop: '8px' }}>
+                            ⚠️ 删除文件夹将同时删除其中的所有文件，不可撤销！
+                        </p>
+                    )}
+                </div>
+            ),
             okText: '确定删除',
             cancelText: '取消',
             okType: 'danger',
-            onOk: () => {
+            width: 500,
+            onOk: async () => {
                 try {
-                    setResults([]);
-                    message.success('所有图片已删除');
+                    // 调用后端API删除
+                    const response = await fetch(`${API_BASE_URL}/files/delete`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ file_paths: itemsToDelete }),
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('删除失败');
+                    }
+
+                    const result = await response.json();
+                    const deletedCount = result.data?.deleted_count || itemCount;
+
+                    message.success(`成功删除 ${deletedCount} 个项目`);
+                    setDeleteMode(false);
+                    setSelectedFiles(new Set());
+
+                    // 刷新文件树
+                    loadFileTree(true);
                 } catch (error) {
                     console.error('批量删除失败:', error);
                     message.error('批量删除失败');
                 }
             }
+        });
+    };
+
+    const handleFileSelect = (filePath: string, checked: boolean) => {
+        setSelectedFiles(prev => {
+            const newSet = new Set(prev);
+            if (checked) {
+                newSet.add(filePath);
+            } else {
+                newSet.delete(filePath);
+            }
+            return newSet;
         });
     };
 
@@ -1254,6 +1453,8 @@ const CrawlerPage: React.FC = () => {
             // 确保数据类型正确 - 强制转换为数字
             const limit = parseInt(String(values.limit)) || 100;
             const delay = parseInt(String(values.delay)) || 1;
+            // 只有当启用限制时才设置 max_images
+            const maxImages = enableMaxImages ? (parseInt(String(values.max_images)) || 100) : 0;
 
             // 创建爬虫请求
             const crawlRequest: CrawlRequest = {
@@ -1264,6 +1465,7 @@ const CrawlerPage: React.FC = () => {
                 order: values.order as Order,
                 mode: values.mode as Mode,
                 limit: limit,
+                max_images: maxImages,
                 delay: delay,
                 proxy_enabled: proxyEnabled,
                 proxy_url: proxyEnabled ? `http://${proxyUrl}` : undefined,
@@ -1279,6 +1481,7 @@ const CrawlerPage: React.FC = () => {
             form.resetFields();
             setProxyEnabled(false);
             setProxyUrl('127.0.0.1:7890');
+            setEnableMaxImages(false);
             message.success('任务创建成功');
         } catch (error) {
             console.error('创建任务失败:', error);
@@ -1328,7 +1531,7 @@ const CrawlerPage: React.FC = () => {
 
             <Row gutter={[24, 24]} style={{ height: '500px' }}>
                 {/* 任务管理 */}
-                <Col xs={24} lg={14} style={{ height: '100%' }}>
+                <Col xs={24} lg={15} style={{ height: '100%' }}>
                     <Card
                         title="📋 爬取任务"
                         extra={
@@ -1412,7 +1615,14 @@ const CrawlerPage: React.FC = () => {
 
             {/* 爬取结果 - 文件树视图 */}
             <Card
-                title="🖼️ 爬取结果"
+                title={
+                    <Space>
+                        <span>🖼️ 爬取结果</span>
+                        {deleteMode && (
+                            <Tag color="orange">删除模式：可以选择要删除的文件或文件夹</Tag>
+                        )}
+                    </Space>
+                }
                 style={{ marginTop: 24 }}
                 extra={
                     <Space>
@@ -1428,13 +1638,37 @@ const CrawlerPage: React.FC = () => {
                         >
                             导出数据
                         </Button>
-                        <Button
-                            danger
-                            icon={<DeleteOutlined />}
-                            onClick={handleBatchDelete}
-                        >
-                            批量删除
-                        </Button>
+                        {deleteMode ? (
+                            <>
+                                <Button
+                                    onClick={handleCancelDelete}
+                                >
+                                    取消
+                                </Button>
+                                <Button
+                                    type="primary"
+                                    danger
+                                    icon={<DeleteOutlined />}
+                                    onClick={handleConfirmDelete}
+                                    disabled={selectedFiles.size === 0}
+                                >
+                                    确定删除 ({selectedFiles.size})
+                                </Button>
+                                {selectedFiles.size > 0 && (
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>
+                                        已选择 {selectedFiles.size} 个文件夹
+                                    </Text>
+                                )}
+                            </>
+                        ) : (
+                            <Button
+                                danger
+                                icon={<DeleteOutlined />}
+                                onClick={handleBatchDelete}
+                            >
+                                批量删除
+                            </Button>
+                        )}
                     </Space>
                 }
             >
@@ -1495,6 +1729,9 @@ const CrawlerPage: React.FC = () => {
                                     onToggleExpand={handleToggleExpand}
                                     scrollRef={fileTreeScrollRef}
                                     onScroll={handleScroll}
+                                    deleteMode={deleteMode}
+                                    selectedFiles={selectedFiles}
+                                    onFileSelect={handleFileSelect}
                                 />
                             ) : (
                                 <GridView
@@ -1673,7 +1910,7 @@ const CrawlerPage: React.FC = () => {
                             rules={[{ required: true, message: '请输入标签名' }]}
                         >
                             <Input
-                                placeholder="请输入标签名，如：1girl, anime, landscape"
+                                placeholder="请输入标签名，多个标签请用英文逗号分隔，如：1girl,anime,landscape"
                                 type="text"
                             />
                         </Form.Item>
@@ -1737,11 +1974,11 @@ const CrawlerPage: React.FC = () => {
                         <Col span={12}>
                             <Form.Item
                                 name="limit"
-                                label="爬取数量"
-                                initialValue={1000}
-                                normalize={(value) => value ? parseInt(value) : 1000}
+                                label="爬取页面数量"
+                                initialValue={10}
+                                normalize={(value) => value ? parseInt(value) : 10}
                             >
-                                <Input type="number" placeholder="1000" />
+                                <Input type="number" placeholder="10" />
                             </Form.Item>
                         </Col>
                         <Col span={12}>
@@ -1752,6 +1989,44 @@ const CrawlerPage: React.FC = () => {
                                 normalize={(value) => value ? parseInt(value) : 2}
                             >
                                 <Input type="number" placeholder="2" />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+
+                    {/* 图片数量限制 */}
+                    <Row gutter={16}>
+                        <Col span={24}>
+                            <Form.Item label="图片数量限制">
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                                    <div>
+                                        <input
+                                            type="checkbox"
+                                            checked={enableMaxImages}
+                                            onChange={(e) => {
+                                                setEnableMaxImages(e.target.checked);
+                                                if (e.target.checked && form.getFieldValue('max_images') === 0) {
+                                                    form.setFieldsValue({ max_images: 100 });
+                                                } else if (!e.target.checked) {
+                                                    form.setFieldsValue({ max_images: 0 });
+                                                }
+                                            }}
+                                            style={{ marginRight: '8px' }}
+                                        />
+                                        <span>限制图片数量</span>
+                                    </div>
+                                    {enableMaxImages && (
+                                        <div style={{ flex: 1, maxWidth: '300px' }}>
+                                            <Form.Item
+                                                name="max_images"
+                                                initialValue={100}
+                                                normalize={(value) => value ? parseInt(value) : 100}
+                                                style={{ marginBottom: 0 }}
+                                            >
+                                                <Input type="number" placeholder="100" addonAfter="张" />
+                                            </Form.Item>
+                                        </div>
+                                    )}
+                                </div>
                             </Form.Item>
                         </Col>
                     </Row>
@@ -2090,6 +2365,7 @@ const CrawlerPage: React.FC = () => {
                     scroll={{ y: 400 }}
                 />
             </Modal>
+
         </div>
     );
 };

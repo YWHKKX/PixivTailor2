@@ -64,8 +64,34 @@ const DEFAULT_PARAMS: GenerationParams = {
 };
 
 const AIGeneratorPage: React.FC = () => {
+    // ==================== 缓存管理 ====================
+    const CACHE_KEY = 'ai_generator_config';
+
+    const loadCache = (): any => {
+        try {
+            const cached = localStorage.getItem(CACHE_KEY);
+            if (cached) {
+                return JSON.parse(cached);
+            }
+        } catch (error) {
+            console.error('加载缓存失败:', error);
+        }
+        return null;
+    };
+
+    const saveCache = (data: any) => {
+        try {
+            localStorage.setItem(CACHE_KEY, JSON.stringify(data));
+        } catch (error) {
+            console.error('保存缓存失败:', error);
+        }
+    };
+
     // ==================== 状态管理 ====================
-    const [params, setParams] = useState<GenerationParams>(DEFAULT_PARAMS);
+    const cachedData = loadCache();
+    const [params, setParams] = useState<GenerationParams>(
+        cachedData?.params || DEFAULT_PARAMS
+    );
     const [isGenerating, setIsGenerating] = useState(false);
     const [progress, setProgress] = useState(0);
     const [generatedImages, setGeneratedImages] = useState<string[]>([]);
@@ -78,9 +104,15 @@ const AIGeneratorPage: React.FC = () => {
 
     // 配置管理
     const [configs, setConfigs] = useState<any[]>([]);
-    const [selectedConfig, setSelectedConfig] = useState<string>('');
+    const [selectedConfig, setSelectedConfig] = useState<string>(cachedData?.selectedConfig || '');
     const [configCategories, setConfigCategories] = useState<string[]>([]);
-    const [selectedCategory, setSelectedCategory] = useState<string>('');
+    const [selectedCategory, setSelectedCategory] = useState<string>(cachedData?.selectedCategory || '');
+
+    // 角色特征管理
+    const [characters, setCharacters] = useState<any[]>([]);
+    const [selectedCharacters, setSelectedCharacters] = useState<string[]>(cachedData?.selectedCharacters || []);
+    // 用户输入的原始提示词（不包含角色特征）
+    const [userPrompt, setUserPrompt] = useState<string>(cachedData?.userPrompt || '');
 
     // WebUI 管理
     const [webUIStatus, setWebUIStatus] = useState<string>('stopped');
@@ -88,7 +120,7 @@ const AIGeneratorPage: React.FC = () => {
 
     // LoRA 管理
     const [loras, setLoras] = useState<LoraConfig[]>([]);
-    const [selectedLoras, setSelectedLoras] = useState<string[]>([]);
+    const [selectedLoras, setSelectedLoras] = useState<string[]>(cachedData?.selectedLoras || []);
 
     // 任务管理
     const [tasks, setTasks] = useState<Task[]>([]);
@@ -101,6 +133,19 @@ const AIGeneratorPage: React.FC = () => {
     const [taskLogs, setTaskLogs] = useState<string[]>([]);
     const [taskDetailLoading, setTaskDetailLoading] = useState(false);
     const logContainerRef = useRef<HTMLDivElement>(null);
+
+    // ==================== 自动保存配置 ====================
+    useEffect(() => {
+        const dataToCache = {
+            params,
+            selectedConfig,
+            selectedCategory,
+            selectedCharacters,
+            userPrompt,
+            selectedLoras
+        };
+        saveCache(dataToCache);
+    }, [params, selectedConfig, selectedCategory, selectedCharacters, userPrompt, selectedLoras]);
 
     // ==================== 配置管理 ====================
     const loadConfigs = useCallback(async () => {
@@ -123,10 +168,23 @@ const AIGeneratorPage: React.FC = () => {
         }
     }, []);
 
+    const loadCharacters = useCallback(async () => {
+        try {
+            const charactersList = await apiService.listCharacterProfiles();
+            setCharacters(Array.isArray(charactersList) ? charactersList : []);
+        } catch (error) {
+            console.error('加载角色配置失败:', error);
+            setCharacters([]);
+        }
+    }, []);
+
     const applyConfig = useCallback(async (configId: string) => {
         try {
             const config = await apiService.getConfig(configId);
             if (config) {
+                // 更新 userPrompt（这是用户输入的纯文本，不包含角色特征）
+                setUserPrompt(config.prompt || '');
+
                 setParams(prev => ({
                     ...prev,
                     prompt: config.prompt || '',
@@ -162,9 +220,54 @@ const AIGeneratorPage: React.FC = () => {
         }
     }, []);
 
+    // 更新提示词，合并用户输入的提示词和角色特征
+    const updatePromptWithCharacters = useCallback((basePrompt: string | null = null) => {
+        // 使用传入的参数或当前的 userPrompt
+        const currentUserPrompt = basePrompt !== null ? basePrompt : userPrompt;
+        console.log('updatePromptWithCharacters - currentUserPrompt:', currentUserPrompt);
+        console.log('updatePromptWithCharacters - selectedCharacters:', selectedCharacters);
+
+        // 收集所有选中角色特征的标签
+        const selectedTags: string[] = [];
+
+        selectedCharacters.forEach(characterName => {
+            const character = characters.find(c => c.name === characterName);
+            console.log('processing character:', characterName, character);
+            if (character && character.tags && character.tags.length > 0) {
+                const tagsString = character.tags.map((tag: string) => {
+                    const weight = character.tag_weights?.[tag] || 0;
+                    return weight > 0.7 ? `((${tag}:${weight.toFixed(2)}))` : tag;
+                }).join(', ');
+                selectedTags.push(tagsString);
+            }
+        });
+
+        console.log('selectedTags:', selectedTags);
+
+        // 构建最终提示词：用户输入 + BREAK + 每个角色特征之间用BREAK分隔
+        let finalPrompt = currentUserPrompt;
+        if (selectedTags.length > 0) {
+            // 每个角色特征之间用BREAK分隔
+            const allTagsString = selectedTags.join('\nBREAK\n');
+            if (currentUserPrompt) {
+                finalPrompt = `${currentUserPrompt}\nBREAK\n${allTagsString}`;
+            } else {
+                finalPrompt = allTagsString;
+            }
+        }
+
+        console.log('finalPrompt:', finalPrompt);
+
+        // 更新 params.prompt
+        setParams(prev => ({ ...prev, prompt: finalPrompt }));
+    }, [selectedCharacters, characters, userPrompt]);
+
     const resetToDefaultConfig = useCallback(() => {
         // 重置为默认参数
-        setParams({
+        setUserPrompt('');
+        setSelectedCharacters([]);
+        setParams(prev => ({
+            ...prev,
             prompt: '',
             negative_prompt: '',
             steps: 20,
@@ -182,12 +285,12 @@ const AIGeneratorPage: React.FC = () => {
             hr_upscaler: 'Latent',
             hr_steps: 0,
             hr_denoising_strength: 0.7,
-            loras: [],
-            vae: '',
-            restore_faces: false,
-            tiling: false,
-            clip_skip: 2
-        });
+            loras: prev.loras || [],
+            vae: prev.vae || '',
+            restore_faces: prev.restore_faces || false,
+            tiling: prev.tiling || false,
+            clip_skip: prev.clip_skip || 2
+        }));
 
         // 清空LoRA配置
         setLoras([]);
@@ -492,34 +595,6 @@ const AIGeneratorPage: React.FC = () => {
         }
     }, [logStream]);
 
-    const startWebUIStatusMonitoring = useCallback(async () => {
-        const checkStatus = async () => {
-            try {
-                const status = await apiService.getWebUIStatus();
-                setWebUIStatus(status.status);
-
-                if (status.status === 'running' || status.status === 'external') {
-                    if (!logStream) {
-                        startLogStream();
-                    }
-                } else if (status.status === 'stopped') {
-                    if (logStream) {
-                        logStream.close();
-                        setLogStream(null);
-                    }
-                }
-
-                // 无论什么状态都继续检查，实现实时更新
-                setTimeout(checkStatus, 3000);
-            } catch (error) {
-                // 静默处理错误
-                setTimeout(checkStatus, 5000);
-            }
-        };
-
-        checkStatus();
-    }, []); // 空依赖数组，避免因logStream变化导致函数重新创建
-
     const startLogStream = useCallback(() => {
         if (logStream) {
             logStream.close();
@@ -551,6 +626,34 @@ const AIGeneratorPage: React.FC = () => {
         };
     }, [logStream, webUIStatus]);
 
+    const startWebUIStatusMonitoring = useCallback(async () => {
+        const checkStatus = async () => {
+            try {
+                const status = await apiService.getWebUIStatus();
+                setWebUIStatus(status.status);
+
+                if (status.status === 'running' || status.status === 'external') {
+                    if (!logStream) {
+                        startLogStream();
+                    }
+                } else if (status.status === 'stopped') {
+                    if (logStream) {
+                        logStream.close();
+                        setLogStream(null);
+                    }
+                }
+
+                // 无论什么状态都继续检查，实现实时更新
+                setTimeout(checkStatus, 3000);
+            } catch (error) {
+                // 静默处理错误
+                setTimeout(checkStatus, 5000);
+            }
+        };
+
+        checkStatus();
+    }, [logStream, startLogStream]);
+
     // ==================== 工具函数 ====================
     const handleRandomSeed = useCallback(() => {
         setParams(prev => ({ ...prev, seed: Math.floor(Math.random() * 1000000) }));
@@ -563,10 +666,18 @@ const AIGeneratorPage: React.FC = () => {
 
     // 图片查看器相关函数
     const handleImageClick = useCallback((_imageUrl: string, index: number) => {
+        console.log('handleImageClick called:', index, 'Current viewer visible:', imageViewerVisible);
+
+        // 防止重复触发 - 如果查看器已经显示，则不重复打开
+        if (imageViewerVisible) {
+            console.log('Viewer already visible, skipping');
+            return;
+        }
+
         setViewerImages(generatedImages);
         setCurrentImageIndex(index);
         setImageViewerVisible(true);
-    }, [generatedImages]);
+    }, [generatedImages, imageViewerVisible]);
 
     const handlePrevImage = useCallback(() => {
         setCurrentImageIndex(prev => prev > 0 ? prev - 1 : viewerImages.length - 1);
@@ -727,73 +838,68 @@ const AIGeneratorPage: React.FC = () => {
     useEffect(() => {
         loadConfigs();
         loadCategories();
+        loadCharacters();
         loadTasks(); // 添加任务加载
         startWebUIStatusMonitoring();
 
         // WebSocket任务更新监听
         const handleTaskUpdate = (data: any) => {
             console.log('收到任务更新:', data);
-            if (data.task_id && data.data) {
-                setTasks(prevTasks => {
-                    const updatedTasks = [...prevTasks];
-                    const taskIndex = updatedTasks.findIndex(task => task.id === data.task_id);
-                    if (taskIndex !== -1) {
-                        // 更新现有任务
-                        updatedTasks[taskIndex] = {
-                            ...updatedTasks[taskIndex],
-                            ...data.data,
-                            id: data.task_id // 确保ID正确
-                        };
-                        console.log('更新任务:', updatedTasks[taskIndex]);
-                    } else if (data.data.status === 'running' || data.data.status === 'pending') {
-                        // 新任务，添加到列表
-                        const newTask = {
-                            id: data.task_id,
-                            ...data.data
-                        };
-                        updatedTasks.unshift(newTask);
-                        console.log('添加新任务:', newTask);
-                    }
-                    return updatedTasks;
-                });
 
-                // 如果任务完成且有图片，更新生成结果
-                if (data.data.status === 'completed' && data.data.result && data.data.result.images) {
-                    const images = data.data.result.images;
-                    if (Array.isArray(images) && images.length > 0) {
-                        setGeneratedImages(images);
+            // wsManager 已经解包了 message.data，所以 data 直接就是 TaskUpdate 对象
+            if (!data.task_id) {
+                console.warn('任务更新数据格式不正确:', data);
+                return;
+            }
+
+            const taskId = data.task_id;
+
+            setTasks(prevTasks => {
+                const updatedTasks = [...prevTasks];
+                const taskIndex = updatedTasks.findIndex(task => task.id === taskId);
+
+                if (taskIndex !== -1) {
+                    // 更新现有任务
+                    const updatedTask = {
+                        ...updatedTasks[taskIndex],
+                        ...data,
+                        id: taskId // 确保ID正确
+                    };
+                    updatedTasks[taskIndex] = updatedTask;
+                    console.log('已更新任务:', updatedTask);
+                } else {
+                    // 新任务，添加到列表
+                    const newTask = {
+                        id: taskId,
+                        ...data
+                    };
+                    updatedTasks.unshift(newTask);
+                    console.log('已添加新任务:', newTask);
+                }
+                return updatedTasks;
+            });
+
+            // 如果任务完成且有图片，更新生成结果
+            if (data.status === 'completed' && data.result) {
+                try {
+                    const result = typeof data.result === 'string'
+                        ? JSON.parse(data.result)
+                        : data.result;
+
+                    if (result && result.images && Array.isArray(result.images) && result.images.length > 0) {
+                        setGeneratedImages(result.images);
                         setStatus('生成完成');
-                        message.success(`成功生成 ${images.length} 张图片`);
+                        message.success(`成功生成 ${result.images.length} 张图片`);
                     }
+                } catch (error) {
+                    console.error('解析任务结果失败:', error);
                 }
+            }
 
-                // 如果任务完成且当前处于等待状态，重置状态
-                if (data.data.status === 'completed' && status === '等待中...') {
-                    setIsGenerating(false);
-                    setStatus('就绪');
-                    message.info('上一个任务已完成，可以开始新的生成');
-                }
-
-                // 更新任务列表后，检查是否有最近完成的任务图片
-                setTimeout(() => {
-                    const completedTasks = tasks.filter(task => task.status === 'completed' && task.result);
-                    if (completedTasks.length > 0) {
-                        // 获取最新的完成任务
-                        const latestTask = completedTasks[0];
-                        if (latestTask) {
-                            try {
-                                const result = typeof latestTask.result === 'string'
-                                    ? JSON.parse(latestTask.result)
-                                    : latestTask.result;
-                                if (result && result.images && Array.isArray(result.images)) {
-                                    setGeneratedImages(result.images);
-                                }
-                            } catch (error) {
-                                console.error('解析任务结果失败:', error);
-                            }
-                        }
-                    }
-                }, 100);
+            // 如果任务完成且当前处于等待状态，重置状态
+            if (data.status === 'completed') {
+                setIsGenerating(false);
+                setStatus('就绪');
             }
         };
 
@@ -898,8 +1004,13 @@ const AIGeneratorPage: React.FC = () => {
                         <div>
                             <Text strong>提示词:</Text>
                             <TextArea
-                                value={params.prompt}
-                                onChange={(e) => setParams(prev => ({ ...prev, prompt: e.target.value }))}
+                                value={userPrompt}
+                                onChange={(e) => {
+                                    const newUserPrompt = e.target.value;
+                                    setUserPrompt(newUserPrompt);
+                                    // 同步更新到 params.prompt，包含角色特征
+                                    updatePromptWithCharacters(newUserPrompt);
+                                }}
                                 placeholder="输入提示词..."
                                 maxLength={1000}
                                 showCount
@@ -913,6 +1024,79 @@ const AIGeneratorPage: React.FC = () => {
                                     overflow: 'hidden'
                                 }}
                             />
+                            {/* 显示最终提示词（包含角色特征） */}
+                            {params.prompt !== userPrompt && (
+                                <div style={{ marginTop: 8, padding: 8, backgroundColor: '#f0f0f0', borderRadius: 4, fontSize: '12px' }}>
+                                    <Text strong style={{ color: '#666' }}>最终提示词:</Text>
+                                    <div style={{
+                                        marginTop: 4,
+                                        marginBottom: 0,
+                                        wordBreak: 'break-word',
+                                        maxHeight: '100px',
+                                        overflow: 'auto',
+                                        fontSize: '12px',
+                                        lineHeight: '1.5',
+                                        fontFamily: 'monospace'
+                                    }}>
+                                        {(() => {
+                                            // 解析提示词，为不同部分添加颜色
+                                            const parts = params.prompt.split('\n');
+                                            // 定义多个角色特征的颜色（与用户输入的蓝色区分开）
+                                            const characterColors = [
+                                                { color: '#52c41a', bgColor: '#f6ffed' }, // 绿色
+                                                { color: '#13c2c2', bgColor: '#e6fffb' }, // 青色
+                                                { color: '#722ed1', bgColor: '#f9f0ff' }, // 紫色
+                                                { color: '#eb2f96', bgColor: '#fff0f6' }, // 粉色
+                                                { color: '#fa541c', bgColor: '#fff2e8' }, // 橙红色
+                                                { color: '#faad14', bgColor: '#fffbe6' }, // 金色
+                                                { color: '#2f54eb', bgColor: '#f0f5ff' }, // 深蓝
+                                                { color: '#cf1322', bgColor: '#fff1f0' }, // 红色
+                                            ];
+
+                                            let characterIndex = 0;
+                                            return parts.map((part, index) => {
+                                                let color = '#333';
+                                                let bgColor = 'transparent';
+
+                                                // 用户输入的提示词（第一行且不是BREAK）
+                                                if (index === 0 && part && part.trim() !== 'BREAK') {
+                                                    color = '#0958d9';
+                                                    bgColor = '#e6f7ff';
+                                                }
+                                                // BREAK 分隔符
+                                                else if (part.trim() === 'BREAK') {
+                                                    color = '#fff';
+                                                    bgColor = '#fa8c16';
+                                                }
+                                                // 角色特征标签（包含权重标记的标签）
+                                                else if (part.includes(':0.') || part.includes('(:')) {
+                                                    const charColor = characterColors[characterIndex % characterColors.length];
+                                                    if (charColor) {
+                                                        color = charColor.color;
+                                                        bgColor = charColor.bgColor;
+                                                    }
+                                                    characterIndex++;
+                                                }
+
+                                                return (
+                                                    <div
+                                                        key={index}
+                                                        style={{
+                                                            color,
+                                                            backgroundColor: bgColor,
+                                                            padding: bgColor !== 'transparent' ? '2px 4px' : '0',
+                                                            marginBottom: '2px',
+                                                            borderRadius: bgColor !== 'transparent' ? '2px' : '0'
+                                                        }}
+                                                    >
+                                                        {part}
+                                                    </div>
+                                                );
+                                            });
+                                        })()}
+                                    </div>
+                                </div>
+                            )}
                         </div>
                         <div>
                             <Text strong>负面提示词:</Text>
@@ -1201,10 +1385,113 @@ const AIGeneratorPage: React.FC = () => {
                 </Col>
 
                 <Col span={24}>
+                    <Text strong>角色特征:</Text>
+                    <div style={{
+                        marginTop: 8,
+                        maxHeight: '400px',
+                        overflow: 'auto',
+                        border: '1px solid #f0f0f0',
+                        borderRadius: '6px',
+                        padding: '8px',
+                        backgroundColor: '#fafafa'
+                    }}>
+                        {characters.length > 0 ? (
+                            characters.map((character) => (
+                                <div key={character.name} style={{
+                                    marginBottom: 8,
+                                    padding: 8,
+                                    border: '1px solid #d9d9d9',
+                                    borderRadius: 4,
+                                    backgroundColor: selectedCharacters.includes(character.name) ? '#f0f8ff' : '#ffffff'
+                                }}>
+                                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <Text strong style={{ fontSize: 12 }}>{character.name}</Text>
+                                            <Text style={{ fontSize: 11, color: '#666' }}>{character.tags?.length || 0} 标签</Text>
+                                        </div>
+                                        {character.description && (
+                                            <Text style={{ fontSize: 11, color: '#666' }}>{character.description}</Text>
+                                        )}
+                                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                                            {character.tags && character.tags.slice(0, 10).map((tag: string) => {
+                                                const weight = character.tag_weights?.[tag] || 0;
+                                                return (
+                                                    <Tag key={tag} color="purple">
+                                                        {tag} {weight > 0 ? `(${(weight * 100).toFixed(0)}%)` : ''}
+                                                    </Tag>
+                                                );
+                                            })}
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <Switch
+                                                size="small"
+                                                checked={selectedCharacters.includes(character.name)}
+                                                onChange={(checked) => {
+                                                    // 更新选中列表
+                                                    const newSelected = checked
+                                                        ? [...selectedCharacters, character.name]
+                                                        : selectedCharacters.filter(name => name !== character.name);
+
+                                                    setSelectedCharacters(newSelected);
+
+                                                    // 重新构建提示词（包含所有选中的角色特征）
+                                                    const selectedTags: string[] = [];
+                                                    newSelected.forEach(characterName => {
+                                                        const characterData = characters.find(c => c.name === characterName);
+                                                        if (characterData && characterData.tags && characterData.tags.length > 0) {
+                                                            const tagsString = characterData.tags.map((tag: string) => {
+                                                                const weight = characterData.tag_weights?.[tag] || 0;
+                                                                return weight > 0.7 ? `((${tag}:${weight.toFixed(2)}))` : tag;
+                                                            }).join(', ');
+                                                            selectedTags.push(tagsString);
+                                                        }
+                                                    });
+
+                                                    // 构建最终提示词
+                                                    let finalPrompt = userPrompt;
+                                                    if (selectedTags.length > 0) {
+                                                        // 每个角色特征之间用BREAK分隔
+                                                        const allTagsString = selectedTags.join('\nBREAK\n');
+                                                        if (userPrompt) {
+                                                            finalPrompt = `${userPrompt}\nBREAK\n${allTagsString}`;
+                                                        } else {
+                                                            finalPrompt = allTagsString;
+                                                        }
+                                                    }
+
+                                                    // 更新 params.prompt
+                                                    console.log('更新最终提示词:', finalPrompt);
+                                                    setParams(prev => ({ ...prev, prompt: finalPrompt }));
+                                                }}
+                                            />
+                                            <Text style={{ fontSize: 10, color: '#999' }}>{character.name}</Text>
+                                        </div>
+                                    </Space>
+                                </div>
+                            ))
+                        ) : (
+                            <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                height: '60px',
+                                color: '#999',
+                                fontSize: '14px'
+                            }}>
+                                暂无角色特征配置
+                            </div>
+                        )}
+                    </div>
+                </Col>
+
+                <Col span={24}>
                     <Space>
                         <Button
                             icon={<ReloadOutlined />}
-                            onClick={loadConfigs}
+                            onClick={() => {
+                                loadConfigs();
+                                loadCharacters();
+                            }}
                             size="small"
                         >
                             刷新配置
@@ -1277,7 +1564,7 @@ const AIGeneratorPage: React.FC = () => {
     );
 
     const renderGeneratedImages = () => (
-        <Card title="生成结果" size="small" style={{ height: '825px', overflow: 'auto' }}>
+        <Card title="生成结果" size="small" style={{ height: '600px', overflow: 'auto' }}>
             {generatedImages.length > 0 ? (
                 <Row gutter={[12, 12]}>
                     {generatedImages.map((imageUrl, index) => (
@@ -1290,7 +1577,10 @@ const AIGeneratorPage: React.FC = () => {
                                             cursor: 'pointer',
                                             position: 'relative'
                                         }}
-                                        onClick={() => handleImageClick(imageUrl, index)}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleImageClick(imageUrl, index);
+                                        }}
                                     >
                                         <Image
                                             src={imageUrl}
@@ -1301,6 +1591,9 @@ const AIGeneratorPage: React.FC = () => {
                                                 backgroundColor: '#f8f8f8'
                                             }}
                                             placeholder={<div style={{ height: 150, background: '#f0f0f0', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>加载中...</div>}
+                                            preview={{
+                                                visible: false
+                                            }}
                                         />
                                         <div style={{
                                             position: 'absolute',
@@ -1370,9 +1663,9 @@ const AIGeneratorPage: React.FC = () => {
                         <Col span={24}>
                             {renderParameterControls()}
                         </Col>
-                        {/* 左下：配置管理 */}
+                        {/* 左下：控制面板（移动到生成参数下方） */}
                         <Col span={24}>
-                            {renderConfigSelector()}
+                            {renderControlButtons()}
                         </Col>
                     </Row>
                 </Col>
@@ -1384,9 +1677,9 @@ const AIGeneratorPage: React.FC = () => {
                         <Col span={24}>
                             {renderGeneratedImages()}
                         </Col>
-                        {/* 右下：控制面板 */}
+                        {/* 右下：配置管理 */}
                         <Col span={24}>
-                            {renderControlButtons()}
+                            {renderConfigSelector()}
                         </Col>
                     </Row>
                 </Col>
@@ -1607,18 +1900,20 @@ const AIGeneratorPage: React.FC = () => {
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        position: 'relative'
+                        position: 'relative',
+                        padding: '20px'
                     }}>
                         {viewerImages.length > 0 && (
-                            <Image
+                            <img
                                 src={viewerImages[currentImageIndex]}
                                 alt={`Image ${currentImageIndex + 1}`}
                                 style={{
                                     maxWidth: '100%',
                                     maxHeight: '100%',
+                                    width: 'auto',
+                                    height: 'auto',
                                     objectFit: 'contain'
                                 }}
-                                preview={false}
                             />
                         )}
                     </div>

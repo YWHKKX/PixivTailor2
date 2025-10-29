@@ -157,8 +157,15 @@ class WebSocketManager {
 
     switch (message.type) {
       case 'welcome':
-        console.log('WebSocket 欢迎消息:', message.message || message.data);
+        console.log('WebSocket 欢迎消息:', message.data || 'Connected');
         this.emit('welcome', message);
+        break;
+      case 'pong':
+        // 收到服务器心跳响应，清除心跳超时
+        if (this.heartbeatTimeout) {
+          clearTimeout(this.heartbeatTimeout);
+          this.heartbeatTimeout = null;
+        }
         break;
       case 'task_update':
         this.emit('task_update', message.data as TaskUpdate);

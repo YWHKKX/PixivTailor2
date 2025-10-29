@@ -58,6 +58,9 @@ backend/data/generated/
 # 生成的配置文件
 backend/data/configs/
 
+# 生成的角色配置文件
+backend/data/characters/
+
 # 日志文件
 backend/data/logs/
 

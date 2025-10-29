@@ -3,7 +3,6 @@ package crawler
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"time"
 
@@ -33,8 +32,8 @@ type Crawler interface {
 	// CrawlByUser 按用户爬取
 	CrawlByUser(userID, limit int) ([]*models.PixivImage, error)
 
-	// CrawlByIllust 按插画ID爬取
-	CrawlByIllust(illustID int) (*models.PixivImage, error)
+	// CrawlByIllust 按插画ID爬取（返回所有页面）
+	CrawlByIllust(illustID int) ([]*models.PixivImage, error)
 
 	// DownloadImage 下载图像（统一接口）
 	DownloadImage(url, filepath string, taskID string, progress func(url, filename string, downloaded, total int64, percent float64)) error
@@ -50,12 +49,14 @@ type Crawler interface {
 
 	// SetTaskID 设置任务ID（用于缓存键生成）
 	SetTaskID(taskID string)
+
+	// SetTaskInfo 设置任务信息（用于生成任务文件夹名）
+	SetTaskInfo(taskType string, createdAt time.Time)
 }
 
 // PixivCrawler Pixiv爬虫实现（重构版）
 type PixivCrawler struct {
 	httpClient  api.HTTPClient
-	cache       api.Cache
 	downloader  api.Downloader
 	pixivAPI    api.PixivAPI
 	logCallback func(level, message string)
@@ -74,23 +75,17 @@ func NewCrawler() (Crawler, error) {
 	httpConfig := api.DefaultHTTPClientConfig()
 	httpClient := api.NewHTTPClient(httpConfig)
 
-	// 创建缓存（使用全局缓存目录）
-	cacheConfig := api.DefaultCacheConfig()
-	cacheConfig.CacheDir = pathManager.GetCacheDir()
-	cache := api.NewFileCache(cacheConfig)
-
 	// 创建下载器
 	downloadConfig := api.DefaultDownloadConfig()
 	downloadConfig.SaveDir = pathManager.GetImagesDir()
 	downloader := api.NewDownloader(httpClient, downloadConfig)
 
-	// 创建Pixiv API
-	pixivConfig := api.DefaultPixivConfig(httpClient, cache, downloader)
+	// 创建Pixiv API（不使用缓存）
+	pixivConfig := api.DefaultPixivConfig(httpClient, nil, downloader)
 	pixivAPI := api.NewPixivAPI(pixivConfig)
 
 	return &PixivCrawler{
 		httpClient: httpClient,
-		cache:      cache,
 		downloader: downloader,
 		pixivAPI:   pixivAPI,
 	}, nil
@@ -138,28 +133,20 @@ func NewCrawlerWithConfig(config map[string]interface{}) (Crawler, error) {
 
 	httpClient := api.NewHTTPClient(httpConfig)
 
-	// 创建缓存（使用全局缓存目录）
-	cacheConfig := api.DefaultCacheConfig()
-	pathManager := paths.GetPathManager()
-	if pathManager != nil {
-		cacheConfig.CacheDir = pathManager.GetCacheDir()
-	}
-	cache := api.NewFileCache(cacheConfig)
-
 	// 创建下载器
 	downloadConfig := api.DefaultDownloadConfig()
+	pathManager := paths.GetPathManager()
 	if pathManager != nil {
 		downloadConfig.SaveDir = pathManager.GetImagesDir()
 	}
 	downloader := api.NewDownloader(httpClient, downloadConfig)
 
-	// 创建Pixiv API
-	pixivConfig := api.DefaultPixivConfig(httpClient, cache, downloader)
+	// 创建Pixiv API（不使用缓存）
+	pixivConfig := api.DefaultPixivConfig(httpClient, nil, downloader)
 	pixivAPI := api.NewPixivAPI(pixivConfig)
 
 	return &PixivCrawler{
 		httpClient: httpClient,
-		cache:      cache,
 		downloader: downloader,
 		pixivAPI:   pixivAPI,
 	}, nil
@@ -199,7 +186,7 @@ func loadCrawlerConfig() (*CrawlerConfig, error) {
 	}
 
 	// 读取配置文件
-	data, err := ioutil.ReadFile(configPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("读取爬虫配置文件失败: %v", err)
 	}
@@ -288,25 +275,24 @@ func NewCrawlerForTask(taskID string, config map[string]interface{}) (Crawler, e
 		}
 	}
 
-	httpClient := api.NewHTTPClient(httpConfig)
+	// 从任务配置中读取 delay 参数
+	if delay, exists := config["delay"].(float64); exists && delay > 0 {
+		httpConfig.Delay = time.Duration(delay) * time.Second
+	}
 
-	// 创建任务特定的缓存
-	cacheConfig := api.DefaultCacheConfig()
-	cacheConfig.CacheDir = pathManager.GetTaskCacheDir(taskID)
-	cache := api.NewFileCache(cacheConfig)
+	httpClient := api.NewHTTPClient(httpConfig)
 
 	// 创建任务特定的下载器
 	downloadConfig := api.DefaultDownloadConfig()
 	downloadConfig.SaveDir = pathManager.GetImagesDir() // 直接使用images目录，让下载器自动添加task_前缀
 	downloader := api.NewDownloader(httpClient, downloadConfig)
 
-	// 创建Pixiv API
-	pixivConfig := api.DefaultPixivConfig(httpClient, cache, downloader)
+	// 创建Pixiv API（不使用缓存）
+	pixivConfig := api.DefaultPixivConfig(httpClient, nil, downloader)
 	pixivAPI := api.NewPixivAPI(pixivConfig)
 
 	return &PixivCrawler{
 		httpClient: httpClient,
-		cache:      cache,
 		downloader: downloader,
 		pixivAPI:   pixivAPI,
 	}, nil
@@ -320,6 +306,13 @@ func (c *PixivCrawler) SetLogCallback(callback func(level, message string)) {
 // SetTaskID 设置任务ID
 func (c *PixivCrawler) SetTaskID(taskID string) {
 	c.taskID = taskID
+}
+
+// SetTaskInfo 设置任务信息（用于生成任务文件夹名）
+func (c *PixivCrawler) SetTaskInfo(taskType string, createdAt time.Time) {
+	if c.downloader != nil {
+		c.downloader.SetTaskInfo(taskType, createdAt)
+	}
 }
 
 // sendLog 发送日志消息
@@ -367,24 +360,6 @@ func (c *PixivCrawler) SetCookie(cookie string) {
 func (c *PixivCrawler) CrawlByTag(query, order, mode string, limit int) ([]*models.PixivImage, error) {
 	logger.Infof("开始按标签爬取: %s, 排序: %s, 模式: %s, 限制: %d", query, order, mode, limit)
 
-	// 尝试从缓存加载
-	cacheKey := fmt.Sprintf("tag_%s_%s_%s", query, order, mode)
-	if c.taskID != "" {
-		cacheKey = fmt.Sprintf("%s_%s", c.taskID, cacheKey)
-	}
-	var cache CrawlCache
-	if err := c.cache.Get(cacheKey, &cache); err == nil && len(cache.Images) > 0 {
-		// 检查缓存是否是今天的
-		today := time.Now().Format("2006-01-02")
-		if cache.Date == today {
-			logger.Infof("使用缓存数据，返回 %d 张图片", len(cache.Images))
-			if limit > 0 && len(cache.Images) > limit {
-				return cache.Images[:limit], nil
-			}
-			return cache.Images, nil
-		}
-	}
-
 	// 使用Pixiv API进行搜索
 	images, err := c.pixivAPI.SearchByTag(query, order, mode, limit)
 	if err != nil {
@@ -393,22 +368,6 @@ func (c *PixivCrawler) CrawlByTag(query, order, mode string, limit int) ([]*mode
 
 	logger.Infof("成功爬取 %d 张图片", len(images))
 
-	// 保存到缓存
-	crawlCache := CrawlCache{
-		Date:      time.Now().Format("2006-01-02"),
-		Type:      "tag",
-		Query:     cacheKey,
-		UserID:    0,
-		Limit:     limit,
-		Images:    images,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}
-
-	if err := c.cache.Set(cacheKey, crawlCache, 24*time.Hour); err != nil {
-		logger.Warnf("保存缓存失败: %v", err)
-	}
-
 	return images, nil
 }
 
@@ -416,25 +375,6 @@ func (c *PixivCrawler) CrawlByTag(query, order, mode string, limit int) ([]*mode
 func (c *PixivCrawler) CrawlByUser(userID, limit int) ([]*models.PixivImage, error) {
 	logger.Infof("开始按用户爬取: %d, 限制: %d", userID, limit)
 	c.sendLog("info", fmt.Sprintf("开始按用户爬取: %d, 限制: %d", userID, limit))
-
-	// 尝试从缓存加载
-	cacheKey := fmt.Sprintf("user_%d", userID)
-	if c.taskID != "" {
-		cacheKey = fmt.Sprintf("%s_%s", c.taskID, cacheKey)
-	}
-	var cache CrawlCache
-	if err := c.cache.Get(cacheKey, &cache); err == nil && len(cache.Images) > 0 {
-		// 检查缓存是否是今天的
-		today := time.Now().Format("2006-01-02")
-		if cache.Date == today {
-			logger.Infof("使用缓存数据，返回 %d 张图片", len(cache.Images))
-			c.sendLog("info", fmt.Sprintf("使用缓存数据，返回 %d 张图片", len(cache.Images)))
-			if limit > 0 && len(cache.Images) > limit {
-				return cache.Images[:limit], nil
-			}
-			return cache.Images, nil
-		}
-	}
 
 	// 使用Pixiv API获取用户作品
 	images, err := c.pixivAPI.GetUserWorks(userID, limit)
@@ -446,27 +386,11 @@ func (c *PixivCrawler) CrawlByUser(userID, limit int) ([]*models.PixivImage, err
 	logger.Infof("成功爬取 %d 张图片", len(images))
 	c.sendLog("info", fmt.Sprintf("成功爬取 %d 张图片", len(images)))
 
-	// 保存到缓存
-	userCache := CrawlCache{
-		Date:      time.Now().Format("2006-01-02"),
-		Type:      "user",
-		Query:     "",
-		UserID:    userID,
-		Limit:     limit,
-		Images:    images,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}
-
-	if err := c.cache.Set(cacheKey, userCache, 24*time.Hour); err != nil {
-		logger.Warnf("保存缓存失败: %v", err)
-	}
-
 	return images, nil
 }
 
-// CrawlByIllust 按插画ID爬取
-func (c *PixivCrawler) CrawlByIllust(illustID int) (*models.PixivImage, error) {
+// CrawlByIllust 按插画ID爬取（返回所有页面）
+func (c *PixivCrawler) CrawlByIllust(illustID int) ([]*models.PixivImage, error) {
 	logger.Infof("开始按插画ID爬取: %d", illustID)
 
 	// 使用Pixiv API获取插画页面
@@ -479,9 +403,9 @@ func (c *PixivCrawler) CrawlByIllust(illustID int) (*models.PixivImage, error) {
 		return nil, fmt.Errorf("未找到图片")
 	}
 
-	// 返回第一张图片
-	logger.Infof("成功获取插画信息，共 %d 张图片，返回第一张", len(images))
-	return images[0], nil
+	// 返回所有图片
+	logger.Infof("成功获取插画信息，共 %d 张图片", len(images))
+	return images, nil
 }
 
 // DownloadImage 下载图像（统一接口）
@@ -493,7 +417,6 @@ func (c *PixivCrawler) DownloadImage(imageURL, savePath string, taskID string, p
 // GetConfig 获取当前配置
 func (c *PixivCrawler) GetConfig() map[string]interface{} {
 	httpConfig := c.httpClient.GetConfig()
-	cacheConfig := c.cache.GetConfig()
 	downloadConfig := c.downloader.GetConfig()
 
 	return map[string]interface{}{
@@ -512,9 +435,6 @@ func (c *PixivCrawler) GetConfig() map[string]interface{} {
 		},
 		"download": map[string]interface{}{
 			"save_dir": downloadConfig.SaveDir,
-		},
-		"cache": map[string]interface{}{
-			"cache_dir": cacheConfig.CacheDir,
 		},
 	}
 }
@@ -569,17 +489,6 @@ func (c *PixivCrawler) UpdateConfig(config map[string]interface{}) error {
 		}
 
 		c.downloader.SetConfig(config)
-	}
-
-	// 更新缓存配置
-	if cacheConfig, ok := config["cache"].(map[string]interface{}); ok {
-		config := c.cache.GetConfig()
-
-		if cacheDir, ok := cacheConfig["cache_dir"].(string); ok {
-			config.CacheDir = cacheDir
-		}
-
-		c.cache.SetConfig(config)
 	}
 
 	return nil

@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"pixiv-tailor/backend/internal/logger"
+	"pixiv-tailor/backend/pkg/paths"
 )
 
 // DownloadConfig 下载配置
@@ -23,8 +26,11 @@ type DownloadProgress func(url, filename string, downloaded, total int64, percen
 type Downloader interface {
 	// DownloadFile 下载文件（统一接口）
 	// 如果 taskID 为空，则使用 savePath 作为完整路径
-	// 如果 taskID 不为空，则自动生成任务目录：{SaveDir}/task_{taskID}/{filename}
+	// 如果 taskID 不为空，则自动生成任务目录：[时间]_任务类型_哈希值/{filename}
 	DownloadFile(url, savePath string, taskID string, progress DownloadProgress) error
+
+	// SetTaskInfo 设置任务信息（用于生成任务目录名）
+	SetTaskInfo(taskType string, createdAt time.Time)
 
 	// SetConfig 设置配置
 	SetConfig(config DownloadConfig)
@@ -37,6 +43,9 @@ type Downloader interface {
 type downloaderImpl struct {
 	config     DownloadConfig
 	httpClient HTTPClient
+	// 任务信息（用于生成任务目录名）
+	taskType  string
+	createdAt time.Time
 }
 
 // NewDownloader 创建新的下载器
@@ -47,17 +56,48 @@ func NewDownloader(httpClient HTTPClient, config DownloadConfig) Downloader {
 	}
 }
 
+// SetTaskInfo 设置任务信息
+func (d *downloaderImpl) SetTaskInfo(taskType string, createdAt time.Time) {
+	d.taskType = taskType
+	d.createdAt = createdAt
+}
+
 // DownloadFile 下载文件（统一接口）
 func (d *downloaderImpl) DownloadFile(url, savePath string, taskID string, progress DownloadProgress) error {
 	var finalPath string
 
 	if taskID != "" {
-		// 为任务生成目录：{SaveDir}/task_{taskID}/{filename}
-		taskDir := filepath.Join(d.config.SaveDir, fmt.Sprintf("task_%s", taskID))
+		// 使用 PathManager 生成任务目录：{SaveDir}/[时间]_任务类型_哈希值/
+		pathManager := paths.GetPathManager()
+		var taskDir string
+
+		if d.taskType != "" && !d.createdAt.IsZero() {
+			// 使用新格式：[2025-10-28_21:16]_任务类型_哈希值
+			taskDir = pathManager.GetTaskImagesDir(taskID, d.taskType, d.createdAt)
+		} else {
+			// 回退到旧格式：task_{taskID}
+			taskDir = filepath.Join(d.config.SaveDir, fmt.Sprintf("task_%s", taskID))
+		}
+
+		// 如果 savePath 为空，从 URL 中提取文件名
+		if savePath == "" {
+			logger.Warnf("DownloadFile: savePath is empty, extracting filename from URL: %s", url)
+			// 从 URL 中提取文件名和扩展名
+			rawFilename := filepath.Base(url)
+			// 如果 URL 中没有文件名或扩展名，使用默认值
+			if rawFilename == "" || rawFilename == "/" || rawFilename == "." {
+				logger.Warnf("DownloadFile: unable to extract filename from URL, using default: image.jpg")
+				rawFilename = "image.jpg"
+			} else {
+				logger.Infof("DownloadFile: extracted filename from URL: %s", rawFilename)
+			}
+			savePath = rawFilename
+		}
+
 		finalPath = filepath.Join(taskDir, filepath.Base(savePath))
+		logger.Infof("DownloadFile: final save path: %s", finalPath)
 	} else {
-		// 使用完整路径
-		finalPath = savePath
+		logger.Error("DownloadFile: taskID is empty")
 	}
 
 	var lastErr error

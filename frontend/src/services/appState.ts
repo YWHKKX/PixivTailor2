@@ -74,15 +74,21 @@ export interface ModelConfig {
 // ==================== 任务状态类型 ====================
 export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
+// 爬虫相关类型
+export type CrawlType = 'tag' | 'user' | 'illust';
+export type Order = 'date_d' | 'popular_d';
+export type Mode = 'safe' | 'r18' | 'all';
+
 export interface Task {
   id: string;
-  type: 'generation' | 'crawl' | 'batch';
+  type: 'generation' | 'crawl' | 'batch' | 'tag';
   status: TaskStatus;
   progress: number;
   message: string;
   result?: any;
   error?: string;
   error_message?: string;
+  stage?: string; // 任务阶段信息
   created_at: string;
   started_at?: string;
   completed_at?: string;
@@ -91,6 +97,9 @@ export interface Task {
   // 图片统计字段
   images_generated?: number;
   images_success?: number;
+  
+  // 任务配置
+  config?: string;
   
   // 任务特定数据
   params?: GenerationParams;
@@ -101,29 +110,27 @@ export interface Task {
   total_items?: number;
   processed_items?: number;
   failed_items?: number;
-  
-  // AI生成任务特定字段
-  images_generated?: number;
-  images_success?: number;
   images_found?: number;
   images_downloaded?: number;
+  name?: string;
 }
 
 // ==================== 爬虫相关类型 ====================
 export interface CrawlRequest {
   task_id?: string;
-  tags: string[];
-  date_range: {
+  tags?: string[];
+  date_range?: {
     start: string;
     end: string;
   };
-  rating: 'all' | 'safe' | 'questionable' | 'explicit';
+  rating?: 'all' | 'safe' | 'questionable' | 'explicit';
   limit: number;
-  quality: 'original' | 'large' | 'medium' | 'small';
-  save_path: string;
-  download_images: boolean;
-  download_metadata: boolean;
-  filter_duplicates: boolean;
+  max_images?: number; // 图片数量限制，0表示不限制
+  quality?: 'original' | 'large' | 'medium' | 'small';
+  save_path?: string;
+  download_images?: boolean;
+  download_metadata?: boolean;
+  filter_duplicates?: boolean;
   custom_filters?: {
     min_score?: number;
     max_score?: number;
@@ -132,6 +139,17 @@ export interface CrawlRequest {
     min_views?: number;
     max_views?: number;
   };
+  // Pixiv爬虫特定字段
+  type?: 'tag' | 'user' | 'illust';
+  query?: string;
+  user_id?: number;
+  illust_id?: number;
+  order?: string;
+  mode?: string;
+  delay?: number;
+  proxy_enabled?: boolean;
+  proxy_url?: string;
+  cookie?: string;
 }
 
 export interface CrawlConfig {

@@ -3,9 +3,12 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
+	"pixiv-tailor/backend/internal/logger"
 	"pixiv-tailor/backend/pkg/models"
 )
 
@@ -56,9 +59,32 @@ func NewPixivAPI(config PixivConfig) PixivAPI {
 
 // SearchByTag 按标签搜索
 func (p *pixivAPIImpl) SearchByTag(query, order, mode string, limit int) ([]*models.PixivImage, error) {
+	// 处理多个标签：Pixiv 支持空格分隔的多个标签进行 AND 搜索
+	// 例如: "girl,elsa" -> "girl elsa", "エルザ,Re:ゼロ" -> "エルザ Re:ゼロ"
+	normalizedQuery := query
+	if strings.Contains(query, ",") {
+		// 将逗号替换为空格（Pixiv 使用空格进行 AND 搜索）
+		normalizedQuery = strings.ReplaceAll(query, ",", " ")
+		// 移除多余空格
+		for strings.Contains(normalizedQuery, "  ") {
+			normalizedQuery = strings.ReplaceAll(normalizedQuery, "  ", " ")
+		}
+		normalizedQuery = strings.TrimSpace(normalizedQuery)
+		logger.Debugf("原始查询: %s -> 标准化: %s", query, normalizedQuery)
+	}
+
+	// URL编码标签
+	// url.QueryEscape 会将空格编码为 '+'，但 Pixiv API 需要 '%20'
+	encodedQuery := url.QueryEscape(normalizedQuery)
+	encodedQuery = strings.ReplaceAll(encodedQuery, "+", "%20")
+
 	// 构建搜索URL
+	// 格式: https://www.pixiv.net/ajax/search/artworks/TAG?word=TAG&order=DATE&mode=all&p=1&s_mode=s_tag_full&type=all&lang=zh
 	targetURL := fmt.Sprintf("%s/%s?word=%s&order=%s&mode=%s&p=1&s_mode=s_tag_full&type=%s&lang=zh",
-		p.config.SearchTagURL, query, query, order, mode, mode)
+		p.config.SearchTagURL, encodedQuery, encodedQuery, order, mode, mode)
+
+	// 输出生成的 URL 用于调试
+	logger.Debugf("生成的搜索 URL: %s", targetURL)
 
 	// 创建请求
 	req, err := p.config.HTTPClient.CreateRequest("GET", targetURL, nil)
@@ -404,6 +430,15 @@ type PixivImageResponse struct {
 
 // DefaultPixivConfig 创建默认Pixiv配置
 func DefaultPixivConfig(httpClient HTTPClient, cache Cache, downloader Downloader) PixivConfig {
+	// 创建一个空的缓存实现（不需要缓存功能）
+	var noCache Cache
+	if cache != nil {
+		noCache = cache
+	} else {
+		// 使用nil缓存，表示不使用缓存
+		noCache = nil
+	}
+
 	return PixivConfig{
 		BaseURL:        "https://www.pixiv.net",
 		SearchTagURL:   "https://www.pixiv.net/ajax/search/artworks",
@@ -411,7 +446,7 @@ func DefaultPixivConfig(httpClient HTTPClient, cache Cache, downloader Downloade
 		IllustPagesURL: "https://www.pixiv.net/ajax/illust",
 		ArtworksURL:    "https://www.pixiv.net/artworks",
 		HTTPClient:     httpClient,
-		Cache:          cache,
+		Cache:          noCache,
 		Downloader:     downloader,
 	}
 }

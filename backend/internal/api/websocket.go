@@ -2,8 +2,8 @@ package api
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
+	"pixiv-tailor/backend/internal/logger"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -42,7 +42,7 @@ func NewWSManager() *WSManager {
 func (ws *WSManager) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := ws.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WebSocket升级失败: %v", err)
+		logger.Infof("WebSocket升级失败: %v", err)
 		return
 	}
 	defer conn.Close()
@@ -52,7 +52,7 @@ func (ws *WSManager) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ws.clients[conn] = true
 	ws.mutex.Unlock()
 
-	log.Printf("WebSocket客户端已连接，当前客户端数量: %d", len(ws.clients))
+	logger.Infof("WebSocket客户端已连接，当前客户端数量: %d", len(ws.clients))
 
 	// 启动广播循环
 	go ws.broadcastLoop()
@@ -62,7 +62,7 @@ func (ws *WSManager) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		var msg WSMessage
 		err := conn.ReadJSON(&msg)
 		if err != nil {
-			log.Printf("WebSocket读取错误: %v", err)
+			logger.Infof("WebSocket读取错误: %v", err)
 			break
 		}
 
@@ -75,7 +75,7 @@ func (ws *WSManager) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	delete(ws.clients, conn)
 	ws.mutex.Unlock()
 
-	log.Printf("WebSocket客户端已断开，当前客户端数量: %d", len(ws.clients))
+	logger.Infof("WebSocket客户端已断开，当前客户端数量: %d", len(ws.clients))
 }
 
 // broadcastLoop 广播循环
@@ -87,7 +87,7 @@ func (ws *WSManager) broadcastLoop() {
 			for client := range ws.clients {
 				err := client.WriteMessage(websocket.TextMessage, message)
 				if err != nil {
-					log.Printf("WebSocket发送错误: %v", err)
+					logger.Infof("WebSocket发送错误: %v", err)
 					client.Close()
 					delete(ws.clients, client)
 				}
@@ -106,9 +106,9 @@ func (ws *WSManager) handleMessage(conn *websocket.Conn, msg *WSMessage) {
 		conn.WriteJSON(response)
 	case "subscribe":
 		// 订阅特定任务
-		log.Printf("客户端订阅任务: %s", msg.TaskID)
+		logger.Infof("客户端订阅任务: %s", msg.TaskID)
 	default:
-		log.Printf("未知的WebSocket消息类型: %s", msg.Type)
+		logger.Infof("未知的WebSocket消息类型: %s", msg.Type)
 	}
 }
 
@@ -158,7 +158,7 @@ func (ws *WSManager) BroadcastGlobalLog(level, message string) {
 func (ws *WSManager) broadcastMessage(msg WSMessage) {
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
-		log.Printf("序列化WebSocket消息失败: %v", err)
+		logger.Infof("序列化WebSocket消息失败: %v", err)
 		return
 	}
 

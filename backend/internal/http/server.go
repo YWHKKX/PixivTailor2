@@ -6,16 +6,17 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
+	"pixiv-tailor/backend/internal/logger"
 	"pixiv-tailor/backend/internal/repository"
 	"pixiv-tailor/backend/internal/service"
 	"pixiv-tailor/backend/pkg/paths"
@@ -31,6 +32,7 @@ type HTTPServer struct {
 	DataService             service.DataService
 	SystemService           service.SystemService
 	GenerationConfigService service.GenerationConfigService
+	characterService        *service.CharacterService
 	router                  *mux.Router
 	upgrader                websocket.Upgrader
 	clients                 map[*websocket.Conn]bool
@@ -115,6 +117,7 @@ func NewHTTPServer(
 		DataService:             dataService,
 		SystemService:           systemService,
 		GenerationConfigService: generationConfigService,
+		characterService:        service.NewCharacterService(),
 		router:                  mux.NewRouter(),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -207,6 +210,25 @@ func (s *HTTPServer) setupRoutes() {
 	api.HandleFunc("/crawl/results", s.handleGetCrawlResults).Methods("POST", "OPTIONS")
 	api.HandleFunc("/generated/images", s.handleGetGeneratedImages).Methods("POST", "OPTIONS")
 
+	// 标签管理
+	api.HandleFunc("/tag/create", s.handleCreateTagTask).Methods("POST", "OPTIONS")
+	api.HandleFunc("/tag/images", s.handleGetTaggedImages).Methods("GET", "OPTIONS")
+	api.HandleFunc("/tag/images", s.handleDeleteTaggedImages).Methods("DELETE", "OPTIONS") // 新增：删除所有标签文件
+	api.HandleFunc("/tag/files", s.handleListTagFiles).Methods("GET", "OPTIONS")           // 新增：列出标签文件
+	api.HandleFunc("/tag/file/{filename}", s.handleGetTagFile).Methods("GET", "OPTIONS")   // 新增：获取标签文件内容
+	api.HandleFunc("/tag/analyzers", s.handleGetAvailableAnalyzers).Methods("GET", "OPTIONS")
+	api.HandleFunc("/tag/analyze", s.handleAnalyzeImage).Methods("POST", "OPTIONS")
+	api.HandleFunc("/tag/status", s.handleGetTagTaskStatus).Methods("GET", "OPTIONS")
+	api.HandleFunc("/tag/stop", s.handleStopTagTask).Methods("POST", "OPTIONS")
+
+	// 角色特征管理
+	api.HandleFunc("/character/extract", s.handleExtractCharacterTags).Methods("POST", "OPTIONS")
+	api.HandleFunc("/character/create", s.handleCreateCharacterProfile).Methods("POST", "OPTIONS")
+	api.HandleFunc("/character/update", s.handleUpdateCharacterProfile).Methods("POST", "OPTIONS")
+	api.HandleFunc("/character/delete", s.handleDeleteCharacterProfile).Methods("POST", "OPTIONS")
+	api.HandleFunc("/character/list", s.handleListCharacterProfiles).Methods("GET", "OPTIONS")
+	api.HandleFunc("/character/get", s.handleGetCharacterProfile).Methods("GET", "OPTIONS")
+
 	// 任务管理
 	api.HandleFunc("/task/start", s.handleStartTask).Methods("POST", "OPTIONS")
 	api.HandleFunc("/task/stop", s.handleStopTask).Methods("POST", "OPTIONS")
@@ -215,11 +237,14 @@ func (s *HTTPServer) setupRoutes() {
 	// 系统信息
 	api.HandleFunc("/system/info", s.handleGetSystemInfo).Methods("POST", "OPTIONS")
 
-	// 图片服务
-	api.PathPrefix("/images/").HandlerFunc(s.handleServeImage).Methods("GET", "OPTIONS")
+	// 图片服务 - 使用PathPrefix而不是Method
+	api.PathPrefix("/images/").HandlerFunc(s.handleServeImage)
 
 	// 文件树服务
 	api.HandleFunc("/filetree", s.handleGetFileTree).Methods("POST", "OPTIONS")
+
+	// 文件删除服务
+	api.HandleFunc("/files/delete", s.handleDeleteFiles).Methods("POST", "OPTIONS")
 
 	// 健康检查
 	s.router.HandleFunc("/health", s.handleHealthCheck).Methods("GET", "OPTIONS")
@@ -321,9 +346,9 @@ func (s *HTTPServer) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 
 	// 如果是AI生成任务且正在运行，先停止WebUI的工作
 	if task.Type == "generate" && (task.Status == "running" || task.Status == "pending") {
-		log.Printf("取消AI生成任务 %s，停止WebUI工作", req.TaskID)
+		logger.Infof("取消AI生成任务 %s，停止WebUI工作", req.TaskID)
 		if err := s.stopWebUIGeneration(); err != nil {
-			log.Printf("停止WebUI工作失败: %v", err)
+			logger.Errorf("停止WebUI工作失败: %v", err)
 		}
 	}
 
@@ -369,8 +394,17 @@ func (s *HTTPServer) handleGetTaskImage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 构建图片文件路径
-	taskDir := pathManager.GetTaskImagesDir(taskID)
+	// 尝试获取任务信息以使用新格式
+	task, err := s.TaskService.GetTask(taskID)
+	var taskDir string
+
+	if err == nil && task != nil {
+		// 使用新格式：[时间]_任务类型_哈希值
+		taskDir = pathManager.GetTaskImagesDir(taskID, task.Type, task.CreatedAt)
+	} else {
+		// 回退到旧格式：task_{taskID}
+		taskDir = filepath.Join(pathManager.GetImagesDir(), fmt.Sprintf("task_%s", taskID))
+	}
 
 	// 尝试不同的文件扩展名
 	extensions := []string{"png", "jpg", "jpeg", "webp"}
@@ -382,6 +416,18 @@ func (s *HTTPServer) handleGetTaskImage(w http.ResponseWriter, r *http.Request) 
 		if _, err := os.Stat(imagePath); err == nil {
 			found = true
 			break
+		}
+	}
+
+	// 如果新格式没找到，尝试旧格式（向后兼容）
+	if !found {
+		oldTaskDir := filepath.Join(pathManager.GetImagesDir(), fmt.Sprintf("task_%s", taskID))
+		for _, ext := range extensions {
+			imagePath = filepath.Join(oldTaskDir, fmt.Sprintf("generated_%s_%s.%s", taskID, imageIndex, ext))
+			if _, err := os.Stat(imagePath); err == nil {
+				found = true
+				break
+			}
 		}
 	}
 
@@ -615,12 +661,13 @@ func (s *HTTPServer) handleServeImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	imagesDir := pathManager.GetImagesDir()
+
 	// 构建完整文件路径
-	fullPath := filepath.Join(pathManager.GetImagesDir(), imagePath)
+	fullPath := filepath.Join(imagesDir, imagePath)
 
 	// 检查文件是否存在
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		log.Printf("Image not found: %s", fullPath)
 		http.Error(w, "Image not found", http.StatusNotFound)
 		return
 	}
@@ -654,6 +701,7 @@ func (s *HTTPServer) handleGetFileTree(w http.ResponseWriter, r *http.Request) {
 	// 使用 PathManager 获取图片目录
 	pathManager := paths.GetPathManager()
 	if pathManager == nil {
+		logger.Errorf("handleGetFileTree: Path manager not initialized")
 		s.sendErrorResponse(w, http.StatusInternalServerError, "Path manager not initialized", "")
 		return
 	}
@@ -683,37 +731,72 @@ func buildFileTree(rootPath string) map[string]interface{} {
 	// 读取图片目录
 	entries, err := os.ReadDir(rootPath)
 	if err != nil {
+		logger.Errorf("buildFileTree: 读取目录失败: %v", err)
 		return root
 	}
 
-	children := []map[string]interface{}{}
+	type taskNodeInfo struct {
+		node    map[string]interface{}
+		modTime time.Time
+	}
+
+	nodeList := []taskNodeInfo{}
 
 	for _, entry := range entries {
 		if entry.IsDir() {
-			// 处理任务文件夹（现在直接是 task_{taskID} 格式）
+			// 处理任务文件夹
 			taskPath := filepath.Join(rootPath, entry.Name())
-			taskChildren := []map[string]interface{}{}
+			// 保存相对路径（用于前端显示和删除操作）
+			relativePath := entry.Name()
 
-			// 读取任务文件夹中的图片文件
+			// 获取文件夹修改时间
+			info, err := entry.Info()
+			modTime := time.Time{}
+			if err == nil && info != nil {
+				modTime = info.ModTime()
+			}
+
+			// 加载任务文件夹中的所有图片文件
 			taskEntries, err := os.ReadDir(taskPath)
-			if err == nil {
-				for _, taskEntry := range taskEntries {
-					if !taskEntry.IsDir() {
-						// 获取文件信息
-						filePath := filepath.Join(taskPath, taskEntry.Name())
-						fileInfo, err := os.Stat(filePath)
-						if err == nil {
-							// 构建文件节点
-							fileNode := map[string]interface{}{
-								"key":      entry.Name() + "_" + taskEntry.Name(),
-								"title":    taskEntry.Name(),
-								"isFolder": false,
-								"filePath": filepath.Join(entry.Name(), taskEntry.Name()),
-								"fileSize": fileInfo.Size(),
-								"fileType": getFileMimeType(filepath.Ext(taskEntry.Name())),
-							}
-							taskChildren = append(taskChildren, fileNode)
+			if err != nil {
+				// 继续处理下一个
+				nodeList = append(nodeList, taskNodeInfo{
+					node: map[string]interface{}{
+						"key":      entry.Name(),
+						"title":    entry.Name() + " (读取失败)",
+						"filePath": relativePath, // 使用相对路径
+						"isFolder": true,
+						"children": []map[string]interface{}{},
+					},
+					modTime: modTime,
+				})
+				continue
+			}
+
+			// 支持的图片扩展名
+			imageExts := map[string]bool{
+				".jpg": true, ".jpeg": true, ".png": true,
+				".gif": true, ".bmp": true, ".webp": true,
+				".svg": true, ".ico": true,
+			}
+
+			// 加载所有图片文件
+			taskChildren := []map[string]interface{}{}
+			imageCount := 0
+			for _, taskEntry := range taskEntries {
+				if !taskEntry.IsDir() {
+					ext := strings.ToLower(filepath.Ext(taskEntry.Name()))
+					if imageExts[ext] {
+						imageCount++
+						// 构建文件节点
+						fileNode := map[string]interface{}{
+							"key":      entry.Name() + "_" + taskEntry.Name(),
+							"title":    taskEntry.Name(),
+							"filePath": filepath.Join(entry.Name(), taskEntry.Name()),
+							"fileType": getFileMimeType(ext),
+							"isLeaf":   true,
 						}
+						taskChildren = append(taskChildren, fileNode)
 					}
 				}
 			}
@@ -721,12 +804,32 @@ func buildFileTree(rootPath string) map[string]interface{} {
 			// 构建任务文件夹节点
 			taskNode := map[string]interface{}{
 				"key":      entry.Name(),
-				"title":    entry.Name() + fmt.Sprintf(" (%d张)", len(taskChildren)),
+				"title":    entry.Name() + fmt.Sprintf(" (%d张)", imageCount),
+				"filePath": relativePath, // 使用相对路径
 				"isFolder": true,
-				"children": taskChildren,
+				"children": taskChildren, // 加载子节点
 			}
-			children = append(children, taskNode)
+
+			nodeList = append(nodeList, taskNodeInfo{
+				node:    taskNode,
+				modTime: modTime,
+			})
 		}
+	}
+
+	// 按修改时间倒序排列（最新的在最上面）
+	for i := 0; i < len(nodeList); i++ {
+		for j := i + 1; j < len(nodeList); j++ {
+			if nodeList[i].modTime.Before(nodeList[j].modTime) {
+				nodeList[i], nodeList[j] = nodeList[j], nodeList[i]
+			}
+		}
+	}
+
+	// 提取排序后的节点
+	children := []map[string]interface{}{}
+	for _, item := range nodeList {
+		children = append(children, item.node)
 	}
 
 	root["children"] = children
@@ -751,17 +854,133 @@ func getFileMimeType(ext string) string {
 	}
 }
 
+// 文件删除处理器（支持删除文件夹和单个文件）
+func (s *HTTPServer) handleDeleteFiles(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		FilePaths []string `json:"file_paths"` // 可以是文件路径或文件夹路径
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+
+	if len(req.FilePaths) == 0 {
+		s.sendErrorResponse(w, http.StatusBadRequest, "No files to delete", "文件列表为空")
+		return
+	}
+
+	// 使用 PathManager 获取图片目录
+	pathManager := paths.GetPathManager()
+	if pathManager == nil {
+		logger.Errorf("handleDeleteFiles: Path manager not initialized")
+		s.sendErrorResponse(w, http.StatusInternalServerError, "Path manager not initialized", "")
+		return
+	}
+
+	imagesDir := pathManager.GetImagesDir()
+
+	deletedCount := 0
+	failedItems := []string{}
+
+	// 分离文件和文件夹，优先删除文件
+	type pathInfo struct {
+		originalPath string
+		fullPath     string
+		isDir        bool
+	}
+
+	var files []pathInfo
+	var dirs []pathInfo
+
+	// 首先分类所有路径
+	for _, itemPath := range req.FilePaths {
+		// 构建完整路径
+		var fullPath string
+		if filepath.IsAbs(itemPath) {
+			fullPath = itemPath
+		} else {
+			fullPath = filepath.Join(imagesDir, itemPath)
+		}
+
+		// 检查路径是否存在
+		info, err := os.Stat(fullPath)
+		if os.IsNotExist(err) {
+			logger.Warnf("路径不存在: %s", fullPath)
+			failedItems = append(failedItems, itemPath)
+			continue
+		}
+
+		if err != nil {
+			logger.Errorf("获取路径信息失败: %s, 错误: %v", fullPath, err)
+			failedItems = append(failedItems, itemPath)
+			continue
+		}
+
+		// 根据类型分类
+		if info.IsDir() {
+			dirs = append(dirs, pathInfo{
+				originalPath: itemPath,
+				fullPath:     fullPath,
+				isDir:        true,
+			})
+		} else {
+			files = append(files, pathInfo{
+				originalPath: itemPath,
+				fullPath:     fullPath,
+				isDir:        false,
+			})
+		}
+	}
+
+	// 先删除文件
+	for _, item := range files {
+		if err := os.Remove(item.fullPath); err != nil {
+			logger.Errorf("删除文件失败: %s, 错误: %v", item.fullPath, err)
+			failedItems = append(failedItems, item.originalPath)
+		} else {
+			logger.Infof("成功删除文件: %s", item.fullPath)
+			deletedCount++
+		}
+	}
+
+	// 后删除文件夹
+	for _, item := range dirs {
+		if err := os.RemoveAll(item.fullPath); err != nil {
+			logger.Errorf("删除文件夹失败: %s, 错误: %v", item.fullPath, err)
+			failedItems = append(failedItems, item.originalPath)
+		} else {
+			logger.Infof("成功删除文件夹: %s", item.fullPath)
+			deletedCount++
+		}
+	}
+
+	// 返回删除结果
+	response := map[string]interface{}{
+		"deleted_count": deletedCount,
+		"failed_count":  len(failedItems),
+		"failed_items":  failedItems,
+		"message":       fmt.Sprintf("成功删除 %d 个项目", deletedCount),
+	}
+
+	if len(failedItems) > 0 {
+		response["warning"] = fmt.Sprintf("%d 个项目删除失败", len(failedItems))
+	}
+
+	s.sendSuccessResponse(w, response)
+}
+
 // WebSocket 处理器
 func (s *HTTPServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WebSocket upgrade failed: %v", err)
+		logger.Errorf("WebSocket upgrade failed: %v", err)
 		return
 	}
 	defer func() {
 		// 确保连接被正确关闭
 		if err := conn.Close(); err != nil {
-			log.Printf("WebSocket close error: %v", err)
+			logger.Errorf("WebSocket close error: %v", err)
 		}
 	}()
 
@@ -776,7 +995,7 @@ func (s *HTTPServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		Message: "Connected to PixivTailor WebSocket server",
 	}
 	if err := conn.WriteJSON(welcomeMsg); err != nil {
-		log.Printf("WebSocket welcome message send failed: %v", err)
+		logger.Errorf("WebSocket welcome message send failed: %v", err)
 		return
 	}
 
@@ -789,9 +1008,9 @@ func (s *HTTPServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		err := conn.ReadJSON(&msg)
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WebSocket unexpected close error: %v", err)
+				logger.Errorf("WebSocket unexpected close error: %v", err)
 			} else {
-				log.Printf("WebSocket read error: %v", err)
+				logger.Errorf("WebSocket read error: %v", err)
 			}
 			break
 		}
@@ -802,7 +1021,7 @@ func (s *HTTPServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		// 处理心跳
 		if msg.Type == "ping" {
 			if err := conn.WriteJSON(WSMessage{Type: "pong"}); err != nil {
-				log.Printf("WebSocket pong send failed: %v", err)
+				logger.Errorf("WebSocket pong send failed: %v", err)
 				break
 			}
 			continue
@@ -823,12 +1042,12 @@ func (s *HTTPServer) handleWebSocketMessage(conn *websocket.Conn, msg WSMessage)
 	switch msg.Type {
 	case "subscribe_task":
 		// 订阅任务更新
-		log.Printf("Client subscribed to task: %s", msg.TaskID)
+		logger.Infof("Client subscribed to task: %s", msg.TaskID)
 	case "unsubscribe_task":
 		// 取消订阅任务更新
-		log.Printf("Client unsubscribed from task: %s", msg.TaskID)
+		logger.Infof("Client unsubscribed from task: %s", msg.TaskID)
 	default:
-		log.Printf("Unknown WebSocket message type: %s", msg.Type)
+		logger.Warnf("Unknown WebSocket message type: %s", msg.Type)
 	}
 }
 
@@ -848,7 +1067,7 @@ func (s *HTTPServer) setupWebSocket() {
 			for _, client := range clients {
 				err := client.WriteMessage(websocket.TextMessage, message)
 				if err != nil {
-					log.Printf("WebSocket write error: %v", err)
+					logger.Errorf("WebSocket write error: %v", err)
 					client.Close()
 					s.clientsMutex.Lock()
 					delete(s.clients, client)
@@ -881,7 +1100,7 @@ func (s *HTTPServer) broadcastTaskUpdate(taskID, status string, progress int) {
 	// 获取任务详细信息，包括图片数量
 	task, err := s.TaskService.GetTask(taskID)
 	if err != nil {
-		log.Printf("获取任务详情失败: %v", err)
+		logger.Errorf("获取任务详情失败: %v", err)
 		// 如果获取失败，使用默认值
 		task = &repository.Task{
 			ID:               taskID,
@@ -896,7 +1115,7 @@ func (s *HTTPServer) broadcastTaskUpdate(taskID, status string, progress int) {
 	var result map[string]interface{}
 	if task.Result != "" {
 		if err := json.Unmarshal([]byte(task.Result), &result); err != nil {
-			log.Printf("解析任务结果失败: %v", err)
+			logger.Errorf("解析任务结果失败: %v", err)
 			result = make(map[string]interface{})
 		}
 	} else {
@@ -975,6 +1194,7 @@ func (s *HTTPServer) handleCreateCrawlTask(w http.ResponseWriter, r *http.Reques
 		Order        string `json:"order"`
 		Mode         string `json:"mode"`
 		Limit        int    `json:"limit"`
+		MaxImages    int    `json:"max_images"`
 		Delay        int    `json:"delay"`
 		ProxyEnabled *bool  `json:"proxy_enabled,omitempty"`
 		ProxyURL     string `json:"proxy_url,omitempty"`
@@ -988,16 +1208,16 @@ func (s *HTTPServer) handleCreateCrawlTask(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	log.Printf("收到爬取任务请求: %s", string(bodyBytes))
+	logger.Debugf("收到爬取任务请求: %s", string(bodyBytes))
 
 	// 解析JSON
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
-		log.Printf("JSON解析失败: %v", err)
+		logger.Errorf("JSON解析失败: %v", err)
 		s.sendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
 
-	log.Printf("解析后的请求: %+v", req)
+	logger.Debugf("解析后的请求: %+v", req)
 
 	// 验证请求参数
 	if req.Type == "" {
@@ -1029,11 +1249,12 @@ func (s *HTTPServer) handleCreateCrawlTask(w http.ResponseWriter, r *http.Reques
 
 	// 创建任务配置
 	config := map[string]interface{}{
-		"type":  req.Type,
-		"order": req.Order,
-		"mode":  req.Mode,
-		"limit": req.Limit,
-		"delay": req.Delay,
+		"type":       req.Type,
+		"order":      req.Order,
+		"mode":       req.Mode,
+		"limit":      req.Limit,
+		"max_images": req.MaxImages,
+		"delay":      req.Delay,
 	}
 
 	// 添加Cookie配置
@@ -1061,10 +1282,10 @@ func (s *HTTPServer) handleCreateCrawlTask(w http.ResponseWriter, r *http.Reques
 	configJSON, _ := json.Marshal(config)
 
 	// 创建任务
-	log.Printf("HTTP: 准备创建爬虫任务, 配置: %s", string(configJSON))
+	logger.Infof("HTTP: 准备创建爬虫任务, 配置: %s", string(configJSON))
 	task, err := s.TaskService.CreateTask("crawl", string(configJSON))
 	if err != nil {
-		log.Printf("HTTP: 创建任务失败: %v", err)
+		logger.Errorf("HTTP: 创建任务失败: %v", err)
 		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to create crawl task", err.Error())
 		return
 	}
@@ -1072,7 +1293,7 @@ func (s *HTTPServer) handleCreateCrawlTask(w http.ResponseWriter, r *http.Reques
 	// 发送全局日志
 	s.broadcastGlobalLog("info", fmt.Sprintf("新任务已创建: %s (类型: %s)", task.ID, req.Type))
 
-	log.Printf("HTTP: 任务创建成功, ID: %s, 状态: %s", task.ID, task.Status)
+	logger.Infof("HTTP: 任务创建成功, ID: %s, 状态: %s", task.ID, task.Status)
 	s.sendSuccessResponse(w, task)
 }
 
@@ -1094,15 +1315,15 @@ func (s *HTTPServer) handleStartTask(w http.ResponseWriter, r *http.Request) {
 
 	taskID := req.TaskID
 
-	log.Printf("HTTP: 手动启动任务: %s", taskID)
+	logger.Infof("HTTP: 手动启动任务: %s", taskID)
 	err := s.TaskService.StartTask(taskID)
 	if err != nil {
-		log.Printf("HTTP: 启动任务失败: %v", err)
+		logger.Errorf("HTTP: 启动任务失败: %v", err)
 		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to start task", err.Error())
 		return
 	}
 
-	log.Printf("HTTP: 任务启动成功: %s", taskID)
+	logger.Infof("HTTP: 任务启动成功: %s", taskID)
 	s.sendSuccessResponse(w, map[string]interface{}{
 		"message": "Task started successfully",
 		"task_id": taskID,
@@ -1134,28 +1355,28 @@ func (s *HTTPServer) handleStopTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("HTTP: 手动停止任务: %s (类型: %s)", taskID, task.Type)
+	logger.Infof("HTTP: 手动停止任务: %s (类型: %s)", taskID, task.Type)
 
 	// 如果是AI生成任务，先停止WebUI的当前生成
 	if task.Type == "generate" {
 		aiHandler := NewAIHandler(nil, s.TaskService, s.GenerationConfigService)
 		if err := aiHandler.stopWebUIGeneration(); err != nil {
-			log.Printf("HTTP: 停止WebUI生成失败: %v", err)
+			logger.Errorf("HTTP: 停止WebUI生成失败: %v", err)
 			// 即使WebUI停止失败，也继续停止任务
 		} else {
-			log.Printf("HTTP: WebUI生成已停止")
+			logger.Infof("HTTP: WebUI生成已停止")
 		}
 	}
 
 	// 停止任务
 	err = s.TaskService.StopTask(taskID)
 	if err != nil {
-		log.Printf("HTTP: 停止任务失败: %v", err)
+		logger.Errorf("HTTP: 停止任务失败: %v", err)
 		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to stop task", err.Error())
 		return
 	}
 
-	log.Printf("HTTP: 任务停止成功: %s", taskID)
+	logger.Infof("HTTP: 任务停止成功: %s", taskID)
 	s.sendSuccessResponse(w, map[string]interface{}{
 		"message": "Task stopped successfully",
 		"task_id": taskID,
@@ -1169,33 +1390,33 @@ func (s *HTTPServer) handleCleanupTasks(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// 添加调试日志
-	log.Printf("收到清理任务请求，Content-Type: %s", r.Header.Get("Content-Type"))
+	logger.Debugf("收到清理任务请求，Content-Type: %s", r.Header.Get("Content-Type"))
 
 	// 读取原始请求体
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("读取请求体失败: %v", err)
+		logger.Errorf("读取请求体失败: %v", err)
 		s.sendErrorResponse(w, http.StatusBadRequest, "Failed to read request body", err.Error())
 		return
 	}
-	log.Printf("原始请求体: %s", string(bodyBytes))
+	logger.Debugf("原始请求体: %s", string(bodyBytes))
 
 	// 解析JSON
 	if err = json.Unmarshal(bodyBytes, &req); err != nil {
-		log.Printf("解析请求体失败: %v", err)
+		logger.Errorf("解析请求体失败: %v", err)
 		s.sendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
 
-	log.Printf("解析后的清理类型: '%s'", req.CleanupType)
+	logger.Debugf("解析后的清理类型: '%s'", req.CleanupType)
 
 	if req.CleanupType == "" {
-		log.Printf("清理类型为空")
+		logger.Warnf("清理类型为空")
 		s.sendErrorResponse(w, http.StatusBadRequest, "Cleanup type is required", "")
 		return
 	}
 
-	log.Printf("HTTP: 开始清理任务, 类型: %s", req.CleanupType)
+	logger.Infof("HTTP: 开始清理任务, 类型: %s", req.CleanupType)
 
 	// 根据清理类型执行清理
 	var cleanedCount int
@@ -1213,12 +1434,12 @@ func (s *HTTPServer) handleCleanupTasks(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err != nil {
-		log.Printf("HTTP: 清理任务失败: %v", err)
+		logger.Errorf("HTTP: 清理任务失败: %v", err)
 		s.sendErrorResponse(w, http.StatusInternalServerError, "Failed to cleanup tasks", err.Error())
 		return
 	}
 
-	log.Printf("HTTP: 任务清理成功, 清理了 %d 个任务", cleanedCount)
+	logger.Infof("HTTP: 任务清理成功, 清理了 %d 个任务", cleanedCount)
 	s.sendSuccessResponse(w, map[string]interface{}{
 		"message":       "Tasks cleaned up successfully",
 		"cleaned_count": cleanedCount,
@@ -1390,7 +1611,7 @@ func (s *HTTPServer) handleWebUILogs(w http.ResponseWriter, r *http.Request) {
 		// 使用defer recover来捕获任何panic
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("WebUI日志初始刷新时发生panic: %v", r)
+				logger.Errorf("WebUI日志初始刷新时发生panic: %v", r)
 			}
 		}()
 		f.Flush()
@@ -1436,7 +1657,7 @@ func (s *HTTPServer) handleWebUILogs(w http.ResponseWriter, r *http.Request) {
 
 			// 尝试写入数据
 			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
-				log.Printf("WebUI日志写入失败: %v", err)
+				logger.Errorf("WebUI日志写入失败: %v", err)
 				return false
 			}
 
@@ -1445,7 +1666,7 @@ func (s *HTTPServer) handleWebUILogs(w http.ResponseWriter, r *http.Request) {
 				// 使用defer recover来捕获任何panic
 				defer func() {
 					if r := recover(); r != nil {
-						log.Printf("WebUI日志刷新时发生panic: %v", r)
+						logger.Errorf("WebUI日志刷新时发生panic: %v", r)
 					}
 				}()
 				f.Flush()
@@ -1856,4 +2077,414 @@ func (s *HTTPServer) StopWebUI() {
 		s.webUIStatus = "stopped"
 		s.broadcastWebUILog("WebUI进程已停止")
 	}
+}
+
+// ==================== 标签处理器实现 ====================
+
+// handleCreateTagTask 创建标签任务
+func (s *HTTPServer) handleCreateTagTask(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		InputDir   interface{} `json:"input_dir"` // 可以是字符串或字符串数组
+		OutputDir  string      `json:"output_dir"`
+		Analyzer   string      `json:"analyzer"`
+		SkipTags   []string    `json:"skip_tags"`
+		ExtendTags []string    `json:"extend_tags"`
+		TagOrder   string      `json:"tag_order"`
+		SaveType   string      `json:"save_type"`
+		Limit      int         `json:"limit"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		s.sendErrorResponse(w, http.StatusBadRequest, "解析请求失败", err.Error())
+		return
+	}
+
+	// 验证请求参数
+	if request.InputDir == nil {
+		s.sendErrorResponse(w, http.StatusBadRequest, "输入目录不能为空", "")
+		return
+	}
+
+	// 转换为数组格式以便验证
+	var inputDirs []string
+	switch v := request.InputDir.(type) {
+	case string:
+		if v != "" {
+			inputDirs = []string{v}
+		}
+	case []string:
+		inputDirs = v
+	case []interface{}:
+		for _, item := range v {
+			if str, ok := item.(string); ok && str != "" {
+				inputDirs = append(inputDirs, str)
+			}
+		}
+	}
+
+	if len(inputDirs) == 0 {
+		s.sendErrorResponse(w, http.StatusBadRequest, "输入目录不能为空", "")
+		return
+	}
+
+	// 设置默认值
+	if request.Analyzer == "" {
+		request.Analyzer = "wd14tagger"
+	}
+	if request.TagOrder == "" {
+		request.TagOrder = "score"
+	}
+	if request.SaveType == "" {
+		request.SaveType = "txt"
+	}
+	if request.Limit == 0 {
+		request.Limit = 100
+	}
+
+	// 创建任务配置（使用转换后的 inputDirs）
+	config := map[string]interface{}{
+		"type":        "tag",
+		"input_dir":   inputDirs,
+		"output_dir":  request.OutputDir,
+		"analyzer":    request.Analyzer,
+		"skip_tags":   request.SkipTags,
+		"extend_tags": request.ExtendTags,
+		"tag_order":   request.TagOrder,
+		"save_type":   request.SaveType,
+		"limit":       request.Limit,
+	}
+
+	// 创建任务
+	configJSON, _ := json.Marshal(config)
+	task, err := s.TaskService.CreateTask("tag", string(configJSON))
+	if err != nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "创建任务失败", err.Error())
+		return
+	}
+
+	// 返回任务信息
+	s.sendSuccessResponse(w, task)
+}
+
+// handleGetTaggedImages 获取已标签的图像
+func (s *HTTPServer) handleGetTaggedImages(w http.ResponseWriter, r *http.Request) {
+	// taskID := r.URL.Query().Get("task_id")
+
+	// 获取tags目录路径
+	pathManager := paths.GetPathManager()
+	if pathManager == nil {
+		logger.Errorf("Path manager not initialized")
+		s.sendErrorResponse(w, http.StatusInternalServerError, "路径管理器未初始化", "")
+		return
+	}
+
+	tagsDir := pathManager.GetTagsDir()
+	if _, err := os.Stat(tagsDir); os.IsNotExist(err) {
+		logger.Warnf("Tags directory does not exist: %s", tagsDir)
+		s.sendSuccessResponse(w, []interface{}{})
+		return
+	}
+
+	// 读取所有JSON文件
+	files, err := ioutil.ReadDir(tagsDir)
+	if err != nil {
+		logger.Errorf("读取目录失败: %v", err)
+		s.sendErrorResponse(w, http.StatusInternalServerError, "读取目录失败", err.Error())
+		return
+	}
+
+	taggedImages := []map[string]interface{}{}
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		// 读取JSON文件
+		filePath := filepath.Join(tagsDir, file.Name())
+		data, err := ioutil.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+
+		// 解析JSON
+		var tagData map[string]interface{}
+		if err := json.Unmarshal(data, &tagData); err != nil {
+			continue
+		}
+
+		// 提取图片路径
+		imagePath, ok := tagData["image_path"].(string)
+		if !ok {
+			continue
+		}
+
+		// 转换为相对路径用于前端访问
+		// 将Windows路径转换为斜杠
+		normalizedPath := filepath.ToSlash(imagePath)
+
+		// 提取相对于 images 目录的路径
+		var relativePath string
+		imagesIndex := strings.LastIndex(normalizedPath, "/images/")
+		if imagesIndex > -1 {
+			// 提取 "images/" 之后的部分
+			relativePath = normalizedPath[imagesIndex+8:] // 跳过 "/images/" (8个字符)
+		} else {
+			// 尝试匹配其他模式
+			if strings.Contains(normalizedPath, "images") {
+				// 查找最后一个 images 后的内容
+				lastImages := strings.LastIndex(normalizedPath, "/images")
+				if lastImages > -1 {
+					relativePath = normalizedPath[lastImages+8:]
+				} else {
+					relativePath = imagePath
+				}
+			} else {
+				relativePath = imagePath
+			}
+		}
+
+		// 移除开头的斜杠（如果有）
+		relativePath = strings.TrimPrefix(relativePath, "/")
+
+		// 提取标签
+		tags := []map[string]interface{}{}
+		if tagsSorted, ok := tagData["tags_sorted"].([]interface{}); ok {
+			for i, tagObj := range tagsSorted {
+				if tagMap, ok := tagObj.(map[string]interface{}); ok {
+					name, _ := tagMap["Name"].(string)
+					confidence, _ := tagMap["Confidence"].(float64)
+					tags = append(tags, map[string]interface{}{
+						"name":       name,
+						"score":      confidence,
+						"category":   "general",
+						"is_general": true,
+					})
+					if i >= 15 { // 限制标签数量
+						break
+					}
+				}
+			}
+		}
+
+		// 创建TaggedImage对象
+		taggedImage := map[string]interface{}{
+			"id":         len(taggedImages) + 1,
+			"image_path": relativePath,
+			"tags":       tags,
+			"analyzer":   "wd14tagger",
+			"metadata": map[string]string{
+				"filename": file.Name(),
+			},
+			"created_at": tagData["created_at"],
+			"updated_at": time.Now(),
+		}
+
+		taggedImages = append(taggedImages, taggedImage)
+	}
+
+	s.sendSuccessResponse(w, taggedImages)
+}
+
+// handleDeleteTaggedImages 删除所有标签文件
+func (s *HTTPServer) handleDeleteTaggedImages(w http.ResponseWriter, r *http.Request) {
+	// 获取tags目录路径
+	pathManager := paths.GetPathManager()
+	if pathManager == nil {
+		logger.Infof("Path manager not initialized")
+		s.sendErrorResponse(w, http.StatusInternalServerError, "路径管理器未初始化", "")
+		return
+	}
+
+	tagsDir := pathManager.GetTagsDir()
+	if _, err := os.Stat(tagsDir); os.IsNotExist(err) {
+		logger.Infof("Tags directory does not exist: %s", tagsDir)
+		s.sendSuccessResponse(w, map[string]string{"message": "标签目录不存在"})
+		return
+	}
+
+	// 读取所有JSON文件并删除
+	files, err := ioutil.ReadDir(tagsDir)
+	if err != nil {
+		logger.Infof("读取目录失败: %v", err)
+		s.sendErrorResponse(w, http.StatusInternalServerError, "读取目录失败", err.Error())
+		return
+	}
+
+	deletedCount := 0
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		// 删除文件
+		filePath := filepath.Join(tagsDir, file.Name())
+		if err := os.Remove(filePath); err != nil {
+			logger.Infof("删除文件失败: %v", err)
+			continue
+		}
+		deletedCount++
+	}
+
+	s.sendSuccessResponse(w, map[string]interface{}{
+		"message": fmt.Sprintf("已删除 %d 个标签文件", deletedCount),
+		"count":   deletedCount,
+	})
+}
+
+// handleGetAvailableAnalyzers 获取可用的分析器
+func (s *HTTPServer) handleGetAvailableAnalyzers(w http.ResponseWriter, r *http.Request) {
+	analyzers := []string{
+		"wd14tagger",
+	}
+
+	s.sendSuccessResponse(w, analyzers)
+}
+
+// handleAnalyzeImage 分析单张图像
+func (s *HTTPServer) handleAnalyzeImage(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		ImagePath string `json:"image_path"`
+		Analyzer  string `json:"analyzer"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		s.sendErrorResponse(w, http.StatusBadRequest, "解析请求失败", err.Error())
+		return
+	}
+
+	// 验证参数
+	if request.ImagePath == "" {
+		s.sendErrorResponse(w, http.StatusBadRequest, "图像路径不能为空", "")
+		return
+	}
+	if request.Analyzer == "" {
+		request.Analyzer = "wd14tagger"
+	}
+
+	// 这里应该调用实际的图像分析服务
+	// 暂时返回模拟数据
+	taggedImage := map[string]interface{}{
+		"id":         1,
+		"image_path": request.ImagePath,
+		"tags": []map[string]interface{}{
+			{"name": "1girl", "score": 0.95, "category": "character", "is_general": true},
+			{"name": "anime", "score": 0.90, "category": "style", "is_general": true},
+			{"name": "cute", "score": 0.85, "category": "quality", "is_general": false},
+		},
+		"analyzer": request.Analyzer,
+		"metadata": map[string]string{
+			"width":  "512",
+			"height": "512",
+		},
+		"created_at": time.Now().Format(time.RFC3339),
+		"updated_at": time.Now().Format(time.RFC3339),
+	}
+
+	s.sendSuccessResponse(w, taggedImage)
+}
+
+// handleGetTagTaskStatus 获取标签任务状态
+func (s *HTTPServer) handleGetTagTaskStatus(w http.ResponseWriter, r *http.Request) {
+	taskID := r.URL.Query().Get("task_id")
+	if taskID == "" {
+		s.sendErrorResponse(w, http.StatusBadRequest, "任务ID不能为空", "")
+		return
+	}
+
+	// 获取任务状态
+	task, err := s.TaskService.GetTask(taskID)
+	if err != nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "获取任务失败", err.Error())
+		return
+	}
+
+	s.sendSuccessResponse(w, task)
+}
+
+// handleStopTagTask 停止标签任务
+func (s *HTTPServer) handleStopTagTask(w http.ResponseWriter, r *http.Request) {
+	taskID := r.URL.Query().Get("task_id")
+	if taskID == "" {
+		s.sendErrorResponse(w, http.StatusBadRequest, "任务ID不能为空", "")
+		return
+	}
+
+	// 停止任务
+	err := s.TaskService.CancelTask(taskID)
+	if err != nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "停止任务失败", err.Error())
+		return
+	}
+
+	s.sendSuccessResponse(w, map[string]string{"message": "任务已停止"})
+}
+
+// handleListTagFiles 列出标签文件
+func (s *HTTPServer) handleListTagFiles(w http.ResponseWriter, r *http.Request) {
+	pathManager := paths.GetPathManager()
+	if pathManager == nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "路径管理器未初始化", "")
+		return
+	}
+
+	tagsDir := pathManager.GetTagsDir()
+
+	// 读取目录
+	entries, err := os.ReadDir(tagsDir)
+	if err != nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "读取目录失败", err.Error())
+		return
+	}
+
+	// 过滤 .json 文件
+	var files []map[string]interface{}
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" {
+			info, _ := entry.Info()
+			files = append(files, map[string]interface{}{
+				"name":     entry.Name(),
+				"size":     info.Size(),
+				"modified": info.ModTime().Format(time.RFC3339),
+			})
+		}
+	}
+
+	s.sendSuccessResponse(w, map[string]interface{}{
+		"path":  tagsDir,
+		"files": files,
+	})
+}
+
+// handleGetTagFile 获取标签文件内容
+func (s *HTTPServer) handleGetTagFile(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	filename := vars["filename"]
+
+	if filename == "" {
+		s.sendErrorResponse(w, http.StatusBadRequest, "文件名不能为空", "")
+		return
+	}
+
+	pathManager := paths.GetPathManager()
+	if pathManager == nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "路径管理器未初始化", "")
+		return
+	}
+
+	// 读取文件内容
+	filePath := pathManager.GetTagPath(filename)
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		s.sendErrorResponse(w, http.StatusNotFound, "文件不存在", err.Error())
+		return
+	}
+
+	// 解析 JSON
+	var jsonData map[string]interface{}
+	if err := json.Unmarshal(data, &jsonData); err != nil {
+		s.sendErrorResponse(w, http.StatusInternalServerError, "解析文件失败", err.Error())
+		return
+	}
+
+	s.sendSuccessResponse(w, jsonData)
 }

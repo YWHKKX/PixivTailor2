@@ -17,9 +17,15 @@
 - **🎯 AI配置管理**: 文件系统配置管理，支持LoRA和参数模板 ✅
 - **🖼️ 图片查看器**: 内置图片查看器，支持键盘导航和批量操作 ✅
 
+### 🏷️ 图像标签功能 ✅
+- **自动标签生成**: 使用 WD14Tagger/DeepDanbooru 自动生成图像标签 ✅
+- **批量处理**: 支持批量图像标签处理和任务管理 ✅
+- **多格式导出**: 支持 TXT、JSON、CSV 格式的标签导出 ✅
+- **实时监控**: WebSocket 实时状态更新和进度监控 ✅
+- **标签管理**: 标签过滤、扩展、排序和可视化展示 ✅
+
 ### 🚧 规划功能
 - **🤖 模型训练**: 集成 Kohya-ss，支持 LoRA 模型训练
-- **🏷️ 智能标签**: 使用 WD14Tagger 自动生成图像标签
 - **📊 标签分类**: 使用 OpenAI API 对标签进行智能分类
 
 ## 🚀 快速开始
@@ -97,7 +103,8 @@ PixivTailor2/
 │   │   ├── pages/             # 页面组件 ✅
 │   │   │   ├── AIGeneratorPage.tsx # AI生成器页面 ✅
 │   │   │   ├── ConfigManagerPage.tsx # 配置管理页面 ✅
-│   │   │   └── CrawlerPage.tsx # 爬虫页面 ✅
+│   │   │   ├── CrawlerPage.tsx # 爬虫页面 ✅
+│   │   │   └── TaggerPage.tsx # 图像标签页面 ✅
 │   │   ├── services/          # API服务 ✅
 │   │   │   ├── aiService.ts   # AI服务客户端 ✅
 │   │   │   └── websocket.ts   # WebSocket服务 ✅
@@ -109,9 +116,11 @@ PixivTailor2/
 ├── docs/                      # 项目文档 ✅
 │   ├── README.md              # 主文档 ✅
 │   ├── ai-module.md           # AI模块文档 ✅
+│   ├── tagger-module.md       # 标签模块文档 ✅
 │   ├── cli-usage.md           # CLI使用说明 ✅
 │   ├── deployment-guide.md    # 部署指南 ✅
-│   └── crawler-module.md      # 爬虫模块文档 ✅
+│   ├── crawler-module.md      # 爬虫模块文档 ✅
+│   └── UPDATE_LOG.md          # 更新日志 ✅
 ├── scripts/                   # 启动脚本 ✅
 │   ├── start-dev.bat          # 开发环境启动 ✅
 │   ├── start-webui-api.bat    # WebUI API启动 ✅
@@ -182,7 +191,18 @@ scripts/start-prod.bat
 - **图片查看**: 内置图片查看器，支持键盘导航
 - **批量操作**: 支持批量删除任务
 
-### 4. 配置管理 ✅
+### 4. 图像标签生成 ✅
+
+访问 http://localhost:3000 使用图像标签功能：
+
+- **自动标签**: 使用 WD14Tagger/DeepDanbooru 自动生成标签
+- **批量处理**: 支持批量图像标签处理和任务管理
+- **配置选项**: 设置输入目录、分析器、输出格式等
+- **标签管理**: 标签过滤、扩展、排序和可视化展示
+- **多格式导出**: 支持 TXT、JSON、CSV 格式的标签导出
+- **实时监控**: WebSocket 实时状态更新和进度监控
+
+### 5. 配置管理 ✅
 
 - **Cookie配置**: 支持默认Cookie和自定义Cookie
 - **代理设置**: 支持HTTP代理配置
@@ -231,6 +251,14 @@ scripts/start-prod.bat
 - **PUT /api/configs/{id}**: 更新配置
 - **DELETE /api/configs/{id}**: 删除配置
 - **GET /api/tasks/{taskId}/images/{index}**: 获取生成的图片
+
+**图像标签相关**:
+- **POST /api/tag/create**: 创建标签生成任务
+- **GET /api/tag/images**: 获取已标签的图像
+- **GET /api/tag/analyzers**: 获取可用的分析器
+- **POST /api/tag/analyze**: 分析单张图像
+- **GET /api/tag/status**: 获取标签任务状态
+- **POST /api/tag/stop**: 停止标签任务
 
 **系统相关**:
 - **GET /health**: 健康检查

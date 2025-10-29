@@ -175,14 +175,44 @@ type TrainedModel struct {
 
 // TagRequest 标签请求
 type TagRequest struct {
-	InputDir   string   `json:"input_dir"`
-	OutputDir  string   `json:"output_dir"`
-	Analyzer   string   `json:"analyzer"`
-	SkipTags   []string `json:"skip_tags"`
-	ExtendTags []string `json:"extend_tags"`
-	TagOrder   string   `json:"tag_order"`
-	SaveType   string   `json:"save_type"`
-	Limit      int      `json:"limit"`
+	InputDir   interface{} `json:"input_dir"` // 可以是字符串或字符串数组
+	OutputDir  string      `json:"output_dir"`
+	Analyzer   string      `json:"analyzer"`
+	Model      string      `json:"model,omitempty"` // 模型名称（可选）
+	SkipTags   []string    `json:"skip_tags"`
+	ExtendTags []string    `json:"extend_tags"`
+	TagOrder   string      `json:"tag_order"`
+	SaveType   string      `json:"save_type"`
+	Limit      int         `json:"limit"`
+}
+
+// GetInputDirs 获取输入目录列表（统一返回数组）
+func (t *TagRequest) GetInputDirs() []string {
+	switch v := t.InputDir.(type) {
+	case string:
+		if v == "" {
+			return []string{}
+		}
+		return []string{v}
+	case []interface{}:
+		result := make([]string, 0, len(v))
+		for _, dir := range v {
+			if dirStr, ok := dir.(string); ok && dirStr != "" {
+				result = append(result, dirStr)
+			}
+		}
+		return result
+	case []string:
+		result := make([]string, 0, len(v))
+		for _, dir := range v {
+			if dir != "" {
+				result = append(result, dir)
+			}
+		}
+		return result
+	default:
+		return []string{}
+	}
 }
 
 // TaggedImage 已标签的图像

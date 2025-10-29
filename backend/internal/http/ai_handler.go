@@ -2,19 +2,19 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"pixiv-tailor/backend/internal/ai"
+	"pixiv-tailor/backend/internal/logger"
 	"pixiv-tailor/backend/internal/service"
 	"pixiv-tailor/backend/pkg/models"
 	"pixiv-tailor/backend/pkg/paths"
@@ -24,16 +24,130 @@ import (
 type AIHandler struct {
 	taskService             service.TaskService
 	generationConfigService service.GenerationConfigService
-	generationMutex         sync.Mutex
-	isGenerating            bool
 }
 
 // NewAIHandler 创建AI处理器
 func NewAIHandler(aiService *ai.AIManager, taskService service.TaskService, generationConfigService service.GenerationConfigService) *AIHandler {
-	return &AIHandler{
+	handler := &AIHandler{
 		taskService:             taskService,
 		generationConfigService: generationConfigService,
 	}
+
+	// 注册 generate 任务的执行器
+	taskService.RegisterExecutor("generate", handler)
+
+	return handler
+}
+
+// ExecuteGenerateTask 实现 TaskExecutor 接口，执行AI生成任务
+func (h *AIHandler) ExecuteGenerateTask(ctx context.Context, taskID string, config map[string]interface{}) {
+	// 获取循环数量
+	loopCount := 1
+	if loopCountVal, ok := config["loop_count"].(float64); ok {
+		loopCount = int(loopCountVal)
+	}
+	if loopCount <= 0 {
+		loopCount = 1
+	}
+
+	logger.Infof("任务 %s 开始执行，循环数量: %d", taskID, loopCount)
+
+	// 存储所有生成的图片URL
+	var allImageUrls []string
+	var totalImagesGenerated int
+
+	// 循环发包
+	for currentLoop := 1; currentLoop <= loopCount; currentLoop++ {
+		logger.Infof("开始第 %d/%d 次发包", currentLoop, loopCount)
+
+		// 检查上下文是否已被取消
+		select {
+		case <-ctx.Done():
+			h.taskService.UpdateTaskStatus(taskID, "cancelled")
+			h.taskService.UpdateTaskError(taskID, "任务已被用户取消")
+			logger.Infof("任务 %s 已取消", taskID)
+			return
+		default:
+		}
+
+		// 计算当前循环的进度
+		loopProgress := int(float64(currentLoop-1) / float64(loopCount) * 90) // 0-90%用于循环
+		h.taskService.UpdateTaskProgress(taskID, 5+loopProgress)
+
+		// 转发到 WebUI API
+		h.taskService.UpdateTaskProgress(taskID, 5+loopProgress+5)
+		response, err := h.forwardToWebUI(config)
+		if err != nil {
+			logger.Infof("第 %d 次发包失败: %v", currentLoop, err)
+			h.taskService.UpdateTaskProgress(taskID, 0)
+			h.taskService.UpdateTaskError(taskID, fmt.Sprintf("第 %d 次发包失败: %v", currentLoop, err))
+			h.taskService.UpdateTaskStatus(taskID, "failed")
+			return
+		}
+
+		// response已经是map[string]interface{}类型，直接使用
+		webuiResponse := response
+
+		// 检查是否有图片
+		if images, ok := webuiResponse["images"].([]interface{}); ok && len(images) > 0 {
+			logger.Infof("第 %d 次发包返回了 %d 张图片", currentLoop, len(images))
+
+			// 更新图片统计
+			h.taskService.UpdateTaskImagesFound(taskID, totalImagesGenerated+len(images))
+
+			// 更新进度到当前循环的50%
+			currentLoopProgress := int(float64(currentLoop-1)/float64(loopCount)*90) + int(float64(currentLoop)/float64(loopCount)*50)
+			h.taskService.UpdateTaskProgress(taskID, 5+currentLoopProgress)
+
+			// 下载并保存图片
+			if err := h.downloadAndSaveImagesWithOffset(taskID, images, totalImagesGenerated); err != nil {
+				logger.Infof("第 %d 次发包图片下载失败: %v", currentLoop, err)
+				h.taskService.UpdateTaskProgress(taskID, 0)
+				h.taskService.UpdateTaskError(taskID, fmt.Sprintf("图片下载失败: %v", err))
+				h.taskService.UpdateTaskStatus(taskID, "failed")
+				return
+			}
+
+			// 更新成功下载的图片统计
+			h.taskService.UpdateTaskImagesDownloaded(taskID, totalImagesGenerated+len(images))
+
+			// 构建图片URL列表
+			for i := range images {
+				imageUrl := fmt.Sprintf("http://localhost:50052/api/tasks/%s/images/%d", taskID, totalImagesGenerated+i+1)
+				allImageUrls = append(allImageUrls, imageUrl)
+			}
+			totalImagesGenerated += len(images)
+
+			// 更新进度到当前循环的80%
+			currentLoopProgress = int(float64(currentLoop-1)/float64(loopCount)*90) + int(float64(currentLoop)/float64(loopCount)*80)
+			h.taskService.UpdateTaskProgress(taskID, 5+currentLoopProgress)
+
+			logger.Infof("第 %d 次发包完成，累计生成 %d 张图片", currentLoop, totalImagesGenerated)
+		} else {
+			logger.Infof("第 %d 次发包未返回图片数据", currentLoop)
+			h.taskService.UpdateTaskProgress(taskID, 0)
+			h.taskService.UpdateTaskError(taskID, "WebUI响应中缺少图片数据")
+			h.taskService.UpdateTaskStatus(taskID, "failed")
+			return
+		}
+
+		// 如果不是最后一次循环，等待一下再继续
+		if currentLoop < loopCount {
+			logger.Infof("等待 2 秒后开始下一次发包...")
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	// 所有循环完成，更新任务状态为完成
+	taskResult := map[string]interface{}{
+		"images": allImageUrls,
+		"count":  totalImagesGenerated,
+		"loops":  loopCount,
+	}
+	h.taskService.UpdateTaskResult(taskID, taskResult)
+	h.taskService.UpdateTaskProgress(taskID, 100)
+	h.taskService.UpdateTaskStatus(taskID, "completed")
+	logger.Infof("任务 %s 完成，共执行 %d 次发包，生成 %d 张图片", taskID, loopCount, totalImagesGenerated)
 }
 
 // AIGenerationRequest AI生成请求
@@ -79,16 +193,6 @@ func (h *AIHandler) HandleGenerateWithConfig(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// 检查并发控制
-	h.generationMutex.Lock()
-	if h.isGenerating {
-		h.generationMutex.Unlock()
-		h.sendErrorResponse(w, http.StatusTooManyRequests, "Generation in progress", "请等待当前生成任务完成")
-		return
-	}
-	h.isGenerating = true
-	h.generationMutex.Unlock()
-
 	// 检查 WebUI 是否运行
 	webuiStatus := h.checkWebUIStatus()
 	if !webuiStatus {
@@ -103,7 +207,7 @@ func (h *AIHandler) HandleGenerateWithConfig(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	log.Printf("HandleGenerateWithConfig - 配置模型: '%s'", config.Model)
+	logger.Infof("HandleGenerateWithConfig - 配置模型: '%s'", config.Model)
 
 	// 合并覆盖参数
 	generationParams := h.mergeConfigWithOverride(config, req.Override)
@@ -119,6 +223,8 @@ func (h *AIHandler) HandleGenerateWithConfig(w http.ResponseWriter, r *http.Requ
 		"width":           generationParams["width"],
 		"height":          generationParams["height"],
 		"batch_size":      generationParams["batch_size"],
+		"batch_count":     generationParams["batch_count"],
+		"loop_count":      generationParams["loop_count"],
 		"sampler":         generationParams["sampler"],
 		"seed":            generationParams["seed"],
 		"model":           generationParams["model"],
@@ -132,20 +238,11 @@ func (h *AIHandler) HandleGenerateWithConfig(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// 启动后台处理
-	go func() {
-		defer func() {
-			h.generationMutex.Lock()
-			h.isGenerating = false
-			h.generationMutex.Unlock()
-		}()
-		h.processGenerationTaskWithConfig(task.ID, req, generationParams)
-	}()
-
+	// 不再需要后台处理，task_service 会自动调用 ExecuteGenerateTask
 	h.sendSuccessResponse(w, map[string]interface{}{
 		"task_id": task.ID,
 		"message": "AI生成任务已创建",
-		"status":  "pending",
+		"status":  task.Status,
 	})
 }
 
@@ -195,15 +292,15 @@ func (h *AIHandler) loadConfigFromFile(configID string) (*models.GenerationConfi
 
 	// 转换为标准格式
 	modelName := h.getStringFromMap(config, "model")
-	log.Printf("配置解析 - 模型名称: '%s'", modelName)
+	// logger.Infof("配置解析 - 模型名称: '%s'", modelName)
 
 	// 如果模型名称为空，尝试从原始配置中直接获取
 	if modelName == "" {
 		if modelVal, exists := config["model"]; exists {
-			log.Printf("原始模型值: %v, 类型: %T", modelVal, modelVal)
+			logger.Infof("原始模型值: %v, 类型: %T", modelVal, modelVal)
 			if str, ok := modelVal.(string); ok {
 				modelName = str
-				log.Printf("重新解析模型名称: '%s'", modelName)
+				logger.Infof("重新解析模型名称: '%s'", modelName)
 			}
 		}
 	}
@@ -257,53 +354,101 @@ func (h *AIHandler) loadConfigFromFile(configID string) (*models.GenerationConfi
 
 // forwardToWebUI 转发请求到 WebUI API
 func (h *AIHandler) forwardToWebUI(params map[string]interface{}) (map[string]interface{}, error) {
+	// 获取并转换参数，确保不是 nil
+	getInt := func(key string, defaultValue int) int {
+		if val, ok := params[key]; ok && val != nil {
+			switch v := val.(type) {
+			case int:
+				return v
+			case float64:
+				return int(v)
+			case int64:
+				return int(v)
+			}
+		}
+		return defaultValue
+	}
+
+	getFloat64 := func(key string, defaultValue float64) float64 {
+		if val, ok := params[key]; ok && val != nil {
+			switch v := val.(type) {
+			case float64:
+				return v
+			case int:
+				return float64(v)
+			}
+		}
+		return defaultValue
+	}
+
+	getString := func(key string, defaultValue string) string {
+		if val, ok := params[key]; ok && val != nil {
+			if str, ok := val.(string); ok {
+				return str
+			}
+		}
+		return defaultValue
+	}
+
+	getBool := func(key string, defaultValue bool) bool {
+		if val, ok := params[key]; ok && val != nil {
+			if b, ok := val.(bool); ok {
+				return b
+			}
+		}
+		return defaultValue
+	}
+
 	// 构造 WebUI API 请求 - 参考PixivTailor项目的实现
 	webuiRequest := map[string]interface{}{
-		"prompt":                 params["prompt"],
-		"negative_prompt":        params["negative_prompt"],
-		"steps":                  params["steps"],
-		"cfg_scale":              params["cfg_scale"],
-		"width":                  params["width"],
-		"height":                 params["height"],
-		"sampler_name":           params["sampler"],
-		"batch_size":             params["batch_size"],
-		"n_iter":                 params["batch_count"],
-		"seed":                   params["seed"],
+		"prompt":                 getString("prompt", ""),
+		"negative_prompt":        getString("negative_prompt", ""),
+		"steps":                  getInt("steps", 20),
+		"cfg_scale":              getFloat64("cfg_scale", 7.0),
+		"width":                  getInt("width", 512),
+		"height":                 getInt("height", 512),
+		"sampler_name":           getString("sampler", "DPM++ 2M Karras"),
+		"batch_size":             getInt("batch_size", 1),
+		"n_iter":                 getInt("batch_count", 1),
+		"seed":                   getInt("seed", -1),
 		"return_grid":            true,
-		"restore_faces":          params["restore_faces"],
+		"restore_faces":          getBool("restore_faces", false),
 		"face_restoration":       "CodeFormer",
 		"face_restoration_model": "null",
 		"send_images":            true, // 强制返回图片数据
 		"save_images":            true, // 保存到磁盘
 		"do_not_save_samples":    false,
-		"do_not_save_grid":       params["do_not_save_grid"],
-		"enable_hr":              params["enable_hr"],
+		"do_not_save_grid":       getBool("do_not_save_grid", false),
+		"enable_hr":              getBool("enable_hr", false),
 		"enable-checkbox":        false,
 		"switch_at":              0.8,
-		"denoising_strength":     params["denoising_strength"],
+		"denoising_strength":     getFloat64("denoising_strength", 0.7),
 		"firstphase_width":       0,
 		"firstphase_height":      0,
-		"hr_scale":               params["upscale_by"],
+		"hr_scale":               getFloat64("upscale_by", 2.0),
 		"hr_second_pass_steps":   0,
 		"hr_resize_x":            0,
 		"hr_resize_y":            0,
-		"hires_steps":            params["hires_steps"],
+		"hires_steps":            getInt("hires_steps", 0),
 		"hr_checkpoint_name":     "",
 		"hr_sampler_name":        "",
-		"hr_prompt":              params["prompt"],          // 使用相同的prompt
-		"hr_negative_prompt":     params["negative_prompt"], // 使用相同的negative_prompt
+		"hr_prompt":              getString("prompt", ""),          // 使用相同的prompt
+		"hr_negative_prompt":     getString("negative_prompt", ""), // 使用相同的negative_prompt
 		"hr-checkbox":            false,
-		"hr_upscaler":            params["hires_upscaler"],
-		"tiling":                 params["tiling"],
-		"clip_skip":              params["clip_skip"],
-		"eta":                    params["eta"],
-		"ensd":                   params["ensd"],
+		"hr_upscaler":            getString("hires_upscaler", "Latent"),
+		"tiling":                 getBool("tiling", false),
+		"clip_skip":              getInt("clip_skip", 2),
+		"eta":                    getFloat64("eta", 0.0),
+		"ensd":                   getInt("ensd", 0),
 		"override_settings": func() map[string]interface{} {
-			settings := map[string]interface{}{
-				"sd_model_checkpoint": params["model"],
+			model := getString("model", "")
+			settings := map[string]interface{}{}
+			if model != "" {
+				settings["sd_model_checkpoint"] = model
 			}
 			// 只有当VAE不为空时才添加VAE设置
-			if vae, ok := params["vae"].(string); ok && vae != "" {
+			vae := getString("vae", "")
+			if vae != "" {
 				settings["sd_vae"] = vae
 			}
 			return settings
@@ -353,7 +498,22 @@ func (h *AIHandler) forwardToWebUI(params map[string]interface{}) (map[string]in
 		body, _ := ioutil.ReadAll(resp.Body)
 		errorMap := make(map[string]interface{})
 		json.Unmarshal(body, &errorMap)
-		return nil, fmt.Errorf("WebUI API 返回错误: %d, %v", resp.StatusCode, errorMap["error"])
+
+		// 检查是否是 CUDA out of memory 错误
+		errorMsg := ""
+		if errVal, ok := errorMap["error"]; ok {
+			errorMsg = fmt.Sprintf("%v", errVal)
+		}
+		if errDetail, ok := errorMap["detail"]; ok {
+			errorMsg += fmt.Sprintf(" - %v", errDetail)
+		}
+
+		// 如果是 CUDA OOM 错误，提供更详细的建议
+		if strings.Contains(errorMsg, "out of memory") || strings.Contains(errorMsg, "CUDA") {
+			return nil, fmt.Errorf("显存不足 (GPU Out of Memory): %s\n\n建议:\n1. 降低图片尺寸 (width/height)\n2. 将 batch_size 设为 1\n3. 关闭其他占用显存的程序\n4. 重启 WebUI 释放显存\n5. 使用更小的模型", errorMsg)
+		}
+
+		return nil, fmt.Errorf("WebUI API 返回错误: %d, %s", resp.StatusCode, errorMsg)
 	}
 
 	var result map[string]interface{}
@@ -383,6 +543,8 @@ func (h *AIHandler) mergeConfigWithOverride(config *models.GenerationConfigRespo
 		"model":              config.Model,
 		"sampler":            config.Sampler,
 		"batch_size":         config.BatchSize,
+		"batch_count":        1, // 默认批次数量
+		"loop_count":         1, // 默认循环次数
 		"enable_hr":          config.EnableHR,
 		"restore_faces":      config.RestoreFaces,
 		"clip_skip":          config.ClipSkip,
@@ -476,110 +638,6 @@ func (h *AIHandler) getBoolFromMap(m map[string]interface{}, key string, default
 	return defaultValue
 }
 
-// processGenerationTaskWithConfig 处理带配置的生成任务
-func (h *AIHandler) processGenerationTaskWithConfig(taskID string, req GenerationWithConfigRequest, generationParams map[string]interface{}) {
-	// 获取循环数量
-	loopCount := h.getIntFromMap(generationParams, "loop_count", 1)
-	if loopCount <= 0 {
-		loopCount = 1
-	}
-
-	log.Printf("任务 %s 开始执行，循环数量: %d", taskID, loopCount)
-
-	// 更新任务状态为运行中
-	h.taskService.UpdateTaskProgress(taskID, 5)
-	h.taskService.UpdateTaskStatus(taskID, "running")
-
-	// 存储所有生成的图片URL
-	var allImageUrls []string
-	var totalImagesGenerated int
-
-	// 循环发包
-	for currentLoop := 1; currentLoop <= loopCount; currentLoop++ {
-		log.Printf("开始第 %d/%d 次发包", currentLoop, loopCount)
-
-		// 计算当前循环的进度
-		loopProgress := int(float64(currentLoop-1) / float64(loopCount) * 90) // 0-90%用于循环
-		h.taskService.UpdateTaskProgress(taskID, 5+loopProgress)
-
-		// 转发到 WebUI API
-		h.taskService.UpdateTaskProgress(taskID, 5+loopProgress+5)
-		response, err := h.forwardToWebUI(generationParams)
-		if err != nil {
-			log.Printf("第 %d 次发包失败: %v", currentLoop, err)
-			h.taskService.UpdateTaskProgress(taskID, 0)
-			h.taskService.UpdateTaskStatus(taskID, "failed")
-			return
-		}
-
-		// response已经是map[string]interface{}类型，直接使用
-		webuiResponse := response
-
-		// 检查是否有图片
-		if images, ok := webuiResponse["images"].([]interface{}); ok && len(images) > 0 {
-			log.Printf("第 %d 次发包返回了 %d 张图片", currentLoop, len(images))
-
-			// 更新图片统计
-			h.taskService.UpdateTaskImagesFound(taskID, totalImagesGenerated+len(images))
-
-			// 更新进度到当前循环的50%
-			currentLoopProgress := int(float64(currentLoop-1)/float64(loopCount)*90) + int(float64(currentLoop)/float64(loopCount)*50)
-			h.taskService.UpdateTaskProgress(taskID, 5+currentLoopProgress)
-
-			// 下载并保存图片
-			if err := h.downloadAndSaveImagesWithOffset(taskID, images, totalImagesGenerated); err != nil {
-				log.Printf("第 %d 次发包图片下载失败: %v", currentLoop, err)
-				h.taskService.UpdateTaskProgress(taskID, 0)
-				h.taskService.UpdateTaskStatus(taskID, "failed")
-				return
-			}
-
-			// 更新成功下载的图片统计
-			h.taskService.UpdateTaskImagesDownloaded(taskID, totalImagesGenerated+len(images))
-
-			// 构建图片URL列表
-			for i := range images {
-				imageUrl := fmt.Sprintf("http://localhost:50052/api/tasks/%s/images/%d", taskID, totalImagesGenerated+i+1)
-				allImageUrls = append(allImageUrls, imageUrl)
-			}
-			totalImagesGenerated += len(images)
-
-			// 更新进度到当前循环的80%
-			currentLoopProgress = int(float64(currentLoop-1)/float64(loopCount)*90) + int(float64(currentLoop)/float64(loopCount)*80)
-			h.taskService.UpdateTaskProgress(taskID, 5+currentLoopProgress)
-
-			log.Printf("第 %d 次发包完成，累计生成 %d 张图片", currentLoop, totalImagesGenerated)
-		} else {
-			log.Printf("第 %d 次发包未返回图片数据", currentLoop)
-			if images, exists := webuiResponse["images"]; exists {
-				log.Printf("images字段存在，类型: %T，长度: %d", images, len(images.([]interface{})))
-			} else {
-				log.Printf("WebUI响应中缺少images字段")
-			}
-			h.taskService.UpdateTaskProgress(taskID, 0)
-			h.taskService.UpdateTaskStatus(taskID, "failed")
-			return
-		}
-
-		// 如果不是最后一次循环，等待一下再继续
-		if currentLoop < loopCount {
-			log.Printf("等待 2 秒后开始下一次发包...")
-			time.Sleep(2 * time.Second)
-		}
-	}
-
-	// 所有循环完成，更新任务状态为完成
-	taskResult := map[string]interface{}{
-		"images": allImageUrls,
-		"count":  totalImagesGenerated,
-		"loops":  loopCount,
-	}
-	h.taskService.UpdateTaskResult(taskID, taskResult)
-	h.taskService.UpdateTaskProgress(taskID, 100)
-	h.taskService.UpdateTaskStatus(taskID, "completed")
-	log.Printf("任务 %s 完成，共执行 %d 次发包，生成 %d 张图片", taskID, loopCount, totalImagesGenerated)
-}
-
 // downloadAndSaveImages 下载并保存WebUI生成的图片
 func (h *AIHandler) downloadAndSaveImages(taskID string, images []interface{}) error {
 	return h.downloadAndSaveImagesWithOffset(taskID, images, 0)
@@ -593,8 +651,17 @@ func (h *AIHandler) downloadAndSaveImagesWithOffset(taskID string, images []inte
 		return fmt.Errorf("路径管理器未初始化")
 	}
 
-	// 获取任务图片目录
-	taskDir := pathManager.GetTaskImagesDir(taskID)
+	// 获取任务信息以生成正确的任务目录名
+	task, err := h.taskService.GetTask(taskID)
+	var taskDir string
+
+	if err == nil && task != nil {
+		// 使用新格式：[时间]_任务类型_哈希值
+		taskDir = pathManager.GetTaskImagesDir(taskID, task.Type, task.CreatedAt)
+	} else {
+		// 回退到旧格式：task_{taskID}
+		taskDir = filepath.Join(pathManager.GetImagesDir(), fmt.Sprintf("task_%s", taskID))
+	}
 
 	// 确保目录存在
 	if err := os.MkdirAll(taskDir, 0755); err != nil {
@@ -605,14 +672,14 @@ func (h *AIHandler) downloadAndSaveImagesWithOffset(taskID string, images []inte
 	for i, imageData := range images {
 		imageStr, ok := imageData.(string)
 		if !ok {
-			log.Printf("图片 %d 数据格式错误", i+1)
+			logger.Infof("图片 %d 数据格式错误", i+1)
 			continue
 		}
 
 		// 解码base64图片数据
 		imageBytes, err := h.decodeBase64Image(imageStr)
 		if err != nil {
-			log.Printf("解码图片 %d 失败: %v", i+1, err)
+			logger.Infof("解码图片 %d 失败: %v", i+1, err)
 			continue
 		}
 
@@ -622,11 +689,11 @@ func (h *AIHandler) downloadAndSaveImagesWithOffset(taskID string, images []inte
 		filepath := filepath.Join(taskDir, filename)
 
 		if err := os.WriteFile(filepath, imageBytes, 0644); err != nil {
-			log.Printf("保存图片 %d 失败: %v", i+1, err)
+			logger.Infof("保存图片 %d 失败: %v", i+1, err)
 			continue
 		}
 
-		log.Printf("图片已保存: %s", filepath)
+		logger.Infof("图片已保存: %s", filepath)
 	}
 
 	return nil
